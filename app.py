@@ -69,7 +69,6 @@ def read_video_info(video_path):
         "duration": n_frames / fps
     }
 
-
 def get_bbox(annotation):
     if not isinstance(annotation, dict):
         return None
@@ -79,40 +78,117 @@ def get_bbox(annotation):
         return None
 
     box = boxes[0]
-    return (
-        int(round(float(box["xmin"]))),
-        int(round(float(box["ymin"]))),
-        int(round(float(box["xmax"]))),
-        int(round(float(box["ymax"])))
+
+    bbox = (
+        float(box["xmin"]),
+        float(box["ymin"]),
+        float(box["xmax"]),
+        float(box["ymax"])
     )
 
+    # image_annotator returns the annotated image too.
+    # We use it to remember the coordinate system in which
+    # the user drew the box.
+    image = annotation.get("image")
+
+    image_width = None
+    image_height = None
+
+    if isinstance(image, np.ndarray):
+        image_height, image_width = image.shape[:2]
+
+    return {
+        "bbox": bbox,
+        "width": image_width,
+        "height": image_height
+    }
 
 def clamp_bbox(bbox, width, height):
     xmin, ymin, xmax, ymax = bbox
+
+    xmin = int(round(xmin))
+    ymin = int(round(ymin))
+    xmax = int(round(xmax))
+    ymax = int(round(ymax))
+
     xmin = max(0, min(xmin, width - 1))
     ymin = max(0, min(ymin, height - 1))
     xmax = max(1, min(xmax, width))
     ymax = max(1, min(ymax, height))
 
     if xmax <= xmin or ymax <= ymin:
-        raise ValueError("Invalid bounding box.")
+        raise ValueError(
+            f"Invalid bounding box after clamping: "
+            f"{(xmin, ymin, xmax, ymax)} "
+            f"for frame size {width}x{height}"
+        )
 
     return xmin, ymin, xmax, ymax
 
+def convert_bbox_to_video(
+    bbox_info,
+    video_width,
+    video_height
+):
+    bbox = bbox_info["bbox"]
 
-def format_bbox(bbox):
-    if bbox is None:
-        return "No bounding box selected."
+    source_width = bbox_info.get("width")
+    source_height = bbox_info.get("height")
+
+    # Normally the annotation image and video have identical
+    # dimensions, so no scaling is needed.
+    if (
+        source_width is None
+        or source_height is None
+    ):
+        return clamp_bbox(
+            bbox,
+            video_width,
+            video_height
+        )
+
+    sx = video_width / float(source_width)
+    sy = video_height / float(source_height)
+
     xmin, ymin, xmax, ymax = bbox
-    return (
-        f"xmin = {xmin}\n"
-        f"ymin = {ymin}\n"
-        f"xmax = {xmax}\n"
-        f"ymax = {ymax}\n"
-        f"width = {xmax - xmin}\n"
-        f"height = {ymax - ymin}"
+
+    converted = (
+        xmin * sx,
+        ymin * sy,
+        xmax * sx,
+        ymax * sy
     )
 
+    return clamp_bbox(
+        converted,
+        video_width,
+        video_height
+    )
+
+def format_bbox(bbox_info):
+    if bbox_info is None:
+        return "No bounding box selected."
+
+    bbox = bbox_info["bbox"]
+    xmin, ymin, xmax, ymax = bbox
+
+    text = (
+        f"xmin = {int(round(xmin))}\n"
+        f"ymin = {int(round(ymin))}\n"
+        f"xmax = {int(round(xmax))}\n"
+        f"ymax = {int(round(ymax))}\n"
+        f"width = {int(round(xmax - xmin))}\n"
+        f"height = {int(round(ymax - ymin))}"
+    )
+
+    if bbox_info.get("width") is not None:
+        text += (
+            f"\n\nAnnotation frame: "
+            f"{bbox_info['width']} x "
+            f"{bbox_info['height']}"
+        )
+
+    return text
 
 def make_annotation(video_path, bbox=None):
     info = read_video_info(video_path)
@@ -160,18 +236,46 @@ def make_preview(video_path, bbox):
 
 
 def create_mask_video(input_video, bbox, output_mask):
-    info = read_video_info(input_video)
-    width = info["width"]
-    height = info["height"]
-    fps = info["fps"]
-    bbox = clamp_bbox(bbox, width, height)
+    cap = cv2.VideoCapture(input_video)
+
+    if not cap.isOpened():
+        raise RuntimeError(
+            f"Could not open video: {input_video}"
+        )
+
+    # Read the actual first decoded frame.
+    ret, first_frame = cap.read()
+
+    if not ret:
+        cap.release()
+        raise RuntimeError(
+            f"Could not read first frame: {input_video}"
+        )
+
+    # Use the actual decoded frame dimensions rather than
+    # relying only on CAP_PROP_FRAME_WIDTH/HEIGHT.
+    height, width = first_frame.shape[:2]
+
+    fps = float(
+        cap.get(cv2.CAP_PROP_FPS)
+    )
+
+    if fps <= 0:
+        cap.release()
+        raise RuntimeError(
+            f"Invalid FPS: {input_video}"
+        )
+
+    bbox = clamp_bbox(
+        bbox,
+        width,
+        height
+    )
+
     xmin, ymin, xmax, ymax = bbox
 
-    cap = cv2.VideoCapture(input_video)
-    if not cap.isOpened():
-        raise RuntimeError(f"Could not open video: {input_video}")
-
     fourcc = cv2.VideoWriter_fourcc(*"FFV1")
+
     writer = cv2.VideoWriter(
         str(output_mask),
         fourcc,
@@ -183,20 +287,46 @@ def create_mask_video(input_video, bbox, output_mask):
     if not writer.isOpened():
         cap.release()
         raise RuntimeError(
-            "Could not create FFV1 mask video. "
-            "Install/use an OpenCV build with FFmpeg + FFV1 support."
+            "Could not create FFV1 mask video."
         )
 
     frame_count = 0
 
+    # Write mask for the first frame.
+    mask = np.zeros(
+        (height, width),
+        dtype=np.uint8
+    )
+
+    mask[ymin:ymax, xmin:xmax] = 255
+
+    mask_bgr = cv2.cvtColor(
+        mask,
+        cv2.COLOR_GRAY2BGR
+    )
+
+    writer.write(mask_bgr)
+    frame_count += 1
+
+    # Process remaining frames.
     while True:
         ret, _ = cap.read()
+
         if not ret:
             break
 
-        mask = np.zeros((height, width), dtype=np.uint8)
+        mask = np.zeros(
+            (height, width),
+            dtype=np.uint8
+        )
+
         mask[ymin:ymax, xmin:xmax] = 255
-        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        mask_bgr = cv2.cvtColor(
+            mask,
+            cv2.COLOR_GRAY2BGR
+        )
+
         writer.write(mask_bgr)
         frame_count += 1
 
@@ -204,7 +334,9 @@ def create_mask_video(input_video, bbox, output_mask):
     writer.release()
 
     if frame_count == 0:
-        raise RuntimeError(f"Empty mask generated: {output_mask}")
+        raise RuntimeError(
+            f"No frames written to mask: {output_mask}"
+        )
 
     return {
         "fps": fps,
@@ -357,8 +489,9 @@ class VideoRemovalEngine:
         total_start = time.time()
 
         for i, input_video in enumerate(input_videos):
-            bbox = boxes[i]
-            if bbox is None:
+            bbox_info = boxes[i]
+
+            if bbox_info is None:
                 results.append({
                     "input_video": input_video,
                     "error": "No bounding box was selected."
@@ -367,28 +500,36 @@ class VideoRemovalEngine:
 
             try:
                 info = read_video_info(input_video)
-                bbox = clamp_bbox(
-                    bbox,
+
+                bbox = convert_bbox_to_video(
+                    bbox_info,
                     info["width"],
                     info["height"]
                 )
 
                 video_name = safe_filename(input_video)
                 output_dir = Path(save_path) / video_name
-                output_dir.mkdir(parents=True, exist_ok=True)
+                output_dir.mkdir(
+                    parents=True,
+                    exist_ok=True
+                )
 
-                mask_path = output_dir / f"{video_name}_bbox_mask.avi"
+                mask_path = (
+                    output_dir /
+                    f"{video_name}_bbox_mask.avi"
+                )
 
                 print(
                     f"\n[{i + 1}/{len(input_videos)}] "
                     f"Generating mask for {video_name}"
                 )
+                print(f"Video size: {info['width']}x{info['height']}")
                 print(f"Bounding box: {bbox}")
 
                 create_mask_video(
-                    input_video,
-                    bbox,
-                    mask_path
+                    input_video=input_video,
+                    bbox=bbox,
+                    output_mask=str(mask_path)
                 )
 
                 verify_mask(
@@ -403,10 +544,13 @@ class VideoRemovalEngine:
                 )
 
                 result["bbox"] = bbox
+                result["mask_path"] = str(mask_path)
+
                 results.append(result)
 
             except Exception as e:
                 traceback.print_exc()
+
                 results.append({
                     "input_video": input_video,
                     "error": str(e)
@@ -422,7 +566,6 @@ class VideoRemovalEngine:
         print("=" * 70)
 
         return results
-
 
 def update_video_list(files):
     paths = normalize_files(files)
@@ -510,14 +653,43 @@ def update_preview(video_index, annotation, video_paths):
     if video_index is None or not video_paths:
         return None
 
-    bbox = get_bbox(annotation)
-    if bbox is None:
+    bbox_info = get_bbox(annotation)
+
+    if bbox_info is None:
         return None
 
-    return make_preview(
-        video_paths[int(video_index)],
-        bbox
+    video_path = video_paths[int(video_index)]
+    info = read_video_info(video_path)
+
+    bbox = convert_bbox_to_video(
+        bbox_info,
+        info["width"],
+        info["height"]
     )
+
+    preview = info["first_frame"].copy()
+    xmin, ymin, xmax, ymax = bbox
+
+    overlay = preview.copy()
+    overlay[ymin:ymax, xmin:xmax] = [255, 0, 0]
+
+    preview = cv2.addWeighted(
+        preview,
+        0.55,
+        overlay,
+        0.45,
+        0
+    )
+
+    cv2.rectangle(
+        preview,
+        (xmin, ymin),
+        (xmax - 1, ymax - 1),
+        (255, 255, 0),
+        3
+    )
+
+    return preview
 
 
 def run_gui(input_videos, boxes, engine, save_path):
@@ -530,13 +702,15 @@ def run_gui(input_videos, boxes, engine, save_path):
     bbox_list = []
 
     for i in range(len(input_videos)):
-        bbox = boxes.get(str(i))
-        if bbox is None:
+        bbox_info = boxes.get(str(i))
+
+        if bbox_info is None:
             raise gr.Error(
                 f"Please draw a bounding box for video "
                 f"{i + 1}: {Path(input_videos[i]).name}"
             )
-        bbox_list.append(tuple(bbox))
+
+        bbox_list.append(bbox_info)
 
     results = engine.process_batch(
         input_videos=input_videos,
@@ -546,7 +720,8 @@ def run_gui(input_videos, boxes, engine, save_path):
 
     successful = [
         r for r in results
-        if r.get("output_path") and Path(r["output_path"]).exists()
+        if r.get("output_path")
+        and Path(r["output_path"]).exists()
     ]
 
     failed = [
@@ -574,7 +749,9 @@ def run_gui(input_videos, boxes, engine, save_path):
     ]
 
     for result in results:
-        name = Path(result["input_video"]).name
+        name = Path(
+            result["input_video"]
+        ).name
 
         if result.get("output_path"):
             lines.append(f"[OK] {name}")
@@ -582,11 +759,15 @@ def run_gui(input_videos, boxes, engine, save_path):
                 f"     bbox = {result['bbox']}"
             )
             lines.append(
+                f"     mask = {result['input_mask']}"
+            )
+            lines.append(
                 f"     output = {result['output_path']}"
             )
         else:
             lines.append(
-                f"[FAILED] {name}: {result.get('error')}"
+                f"[FAILED] {name}: "
+                f"{result.get('error')}"
             )
 
     return (
