@@ -15,9 +15,6 @@ from diffueraser.diffueraser import DiffuEraser
 from propainter.inference import Propainter, get_device
 
 
-WEIGHTS = os.getenv("HF_HUB", "weights")
-
-
 def safe_filename(path):
     name = Path(path).stem
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", name)
@@ -649,22 +646,22 @@ def build_parser():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default=f"{WEIGHTS}/stable-diffusion-v1-5"
+        default=f"weights/stable-diffusion-v1-5"
     )
     parser.add_argument(
         "--vae_path",
         type=str,
-        default=f"{WEIGHTS}/sd-vae-ft-mse"
+        default=f"weights/sd-vae-ft-mse"
     )
     parser.add_argument(
         "--diffueraser_path",
         type=str,
-        default=f"{WEIGHTS}/diffuEraser"
+        default=f"weights/diffuEraser"
     )
     parser.add_argument(
         "--propainter_model_dir",
         type=str,
-        default=f"{WEIGHTS}/propainter"
+        default=f"weights/propainter"
     )
 
     parser.add_argument(
