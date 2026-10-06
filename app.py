@@ -908,7 +908,6 @@ def main():
         server_port=args.server_port,
         share=args.share,
         show_error=True,
-        share=True
     )
 
 
