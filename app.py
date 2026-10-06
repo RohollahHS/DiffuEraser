@@ -2097,7 +2097,7 @@ def main():
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
-        share=share,
+        share=True,
         show_error=True,
         allowed_paths=[
             str(save_path),
