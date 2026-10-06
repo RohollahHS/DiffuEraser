@@ -1,5 +1,6 @@
 import os
 import re
+import glob
 import time
 import uuid
 import shutil
@@ -1227,7 +1228,7 @@ def build_demo(engine, save_path):
             )
             video_selector = gr.Dropdown(
                 label="Current Video",
-                choices=[],
+                choices=glob.glob("/scratch/rohhs/downloads/yt-dlp/*.mp4"),
                 value=None
             )
 
