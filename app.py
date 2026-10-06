@@ -1,80 +1,55 @@
 import os
-import cv2
-import uuid
-import shutil
-import tempfile
+import re
+import time
+import argparse
+import traceback
 from pathlib import Path
 
-import gradio as gr
+import cv2
 import numpy as np
-from PIL import Image
-
+import torch
+import gradio as gr
 from gradio_image_annotation import image_annotator
 
-
-# ============================================================
-# YOUR MODEL IMPORTS
-# ============================================================
-# Replace these with the actual imports from your project.
-#
-# Example:
-# from inference import propainter, video_inpainting_sd
-#
-# The important thing is that these two objects already expose:
-#
-# propainter.forward(...)
-# video_inpainting_sd.forward(...)
-#
-# ----------------------------------------------------------------
-# from your_module import propainter, video_inpainting_sd
-# ============================================================
+from diffueraser.diffueraser import DiffuEraser
+from propainter.inference import Propainter, get_device
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-# These are NOT shown to the user.
-# Change these according to the parameters you normally use.
-
-VIDEO_LENGTH = 81
-REF_STRIDE = 10
-NEIGHBOR_LENGTH = 10
-SUBVIDEO_LENGTH = 50
-
-MASK_DILATION_ITER = 6
-MAX_IMG_SIZE = 960
-GUIDANCE_SCALE = None
-
-# Directory where final results are kept
-OUTPUT_DIR = Path("./outputs")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+WEIGHTS = os.getenv("HF_HUB", "weights")
 
 
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
+def safe_filename(path):
+    name = Path(path).stem
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", name)
 
-def get_video_info(video_path):
-    """
-    Open the input video and return:
-        first_frame_rgb
-        fps
-        frame_count
-        width
-        height
-        duration
-    """
-    if video_path is None:
-        raise gr.Error("Please upload a video first.")
 
+def get_path(file_obj):
+    if file_obj is None:
+        return ""
+    if isinstance(file_obj, (str, Path)):
+        return str(file_obj)
+    if hasattr(file_obj, "path") and file_obj.path:
+        return str(file_obj.path)
+    if hasattr(file_obj, "name") and file_obj.name:
+        return str(file_obj.name)
+    raise TypeError(f"Unsupported file type: {type(file_obj)}")
+
+
+def normalize_files(files):
+    if files is None:
+        return []
+    if not isinstance(files, list):
+        files = [files]
+    return [get_path(f) for f in files if get_path(f)]
+
+
+def read_video_info(video_path):
     cap = cv2.VideoCapture(video_path)
-
     if not cap.isOpened():
-        raise gr.Error(f"Could not open video:\n{video_path}")
+        raise RuntimeError(f"Could not open video: {video_path}")
 
     fps = float(cap.get(cv2.CAP_PROP_FPS))
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -82,755 +57,862 @@ def get_video_info(video_path):
     cap.release()
 
     if not ret:
-        raise gr.Error("Could not read the first frame of the video.")
-
+        raise RuntimeError(f"Could not read first frame: {video_path}")
     if fps <= 0:
-        raise gr.Error("Could not determine the video FPS.")
+        raise RuntimeError(f"Invalid FPS: {video_path}")
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"Invalid resolution: {video_path}")
 
-    # OpenCV -> RGB
-    first_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-    duration = frame_count / fps if fps > 0 else 0
-
-    info = (
-        f"Resolution: {width} × {height}\n"
-        f"FPS: {fps:.6f}\n"
-        f"Frames: {frame_count}\n"
-        f"Duration: {duration:.2f} sec"
-    )
-
-    return first_frame_rgb, fps, frame_count, width, height, info
-
-
-def load_video(video_path):
-    """
-    Called after the user uploads a video.
-
-    Returns an annotation object compatible with image_annotator.
-    """
-    (
-        first_frame_rgb,
-        fps,
-        frame_count,
-        width,
-        height,
-        info,
-    ) = get_video_info(video_path)
-
-    annotation = {
-        "image": first_frame_rgb,
-        "boxes": [],
+    return {
+        "first_frame": cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+        "fps": fps,
+        "n_frames": n_frames,
+        "width": width,
+        "height": height,
+        "duration": n_frames / fps
     }
 
-    return annotation, info
 
-
-def extract_box(annotation):
-    """
-    Extract the single bounding box from the annotation component.
-
-    Returns:
-        (xmin, ymin, xmax, ymax)
-    """
-    if annotation is None:
+def get_bbox(annotation):
+    if not isinstance(annotation, dict):
         return None
 
     boxes = annotation.get("boxes", [])
-
     if not boxes:
         return None
 
     box = boxes[0]
+    return (
+        int(round(float(box["xmin"]))),
+        int(round(float(box["ymin"]))),
+        int(round(float(box["xmax"]))),
+        int(round(float(box["ymax"])))
+    )
 
-    xmin = int(round(box["xmin"]))
-    ymin = int(round(box["ymin"]))
-    xmax = int(round(box["xmax"]))
-    ymax = int(round(box["ymax"]))
+
+def clamp_bbox(bbox, width, height):
+    xmin, ymin, xmax, ymax = bbox
+    xmin = max(0, min(xmin, width - 1))
+    ymin = max(0, min(ymin, height - 1))
+    xmax = max(1, min(xmax, width))
+    ymax = max(1, min(ymax, height))
+
+    if xmax <= xmin or ymax <= ymin:
+        raise ValueError("Invalid bounding box.")
 
     return xmin, ymin, xmax, ymax
 
 
-def show_bbox(annotation):
-    """
-    Display the selected coordinates for debugging/confirmation.
-    This is an output, not an additional user input.
-    """
-    bbox = extract_box(annotation)
-
+def format_bbox(bbox):
     if bbox is None:
         return "No bounding box selected."
-
     xmin, ymin, xmax, ymax = bbox
-
     return (
         f"xmin = {xmin}\n"
         f"ymin = {ymin}\n"
         f"xmax = {xmax}\n"
         f"ymax = {ymax}\n"
-        f"width  = {xmax - xmin}\n"
+        f"width = {xmax - xmin}\n"
         f"height = {ymax - ymin}"
     )
 
 
-# ============================================================
-# MASK PREVIEW
-# ============================================================
+def make_annotation(video_path, bbox=None):
+    info = read_video_info(video_path)
+    value = {
+        "image": info["first_frame"],
+        "boxes": []
+    }
 
-def make_mask_preview(video_path, annotation):
-    """
-    Creates a visualization of the mask over the first frame.
+    if bbox is not None:
+        bbox = clamp_bbox(bbox, info["width"], info["height"])
+        xmin, ymin, xmax, ymax = bbox
+        value["boxes"] = [{
+            "xmin": xmin,
+            "ymin": ymin,
+            "xmax": xmax,
+            "ymax": ymax
+        }]
 
-    White/bright region = area that will be removed.
-    """
-    if video_path is None or annotation is None:
+    return value
+
+
+def make_preview(video_path, bbox):
+    if not video_path or bbox is None:
         return None
 
-    bbox = extract_box(annotation)
+    info = read_video_info(video_path)
+    bbox = clamp_bbox(bbox, info["width"], info["height"])
 
-    if bbox is None:
-        return None
-
-    (
-        first_frame_rgb,
-        fps,
-        frame_count,
-        width,
-        height,
-        info,
-    ) = get_video_info(video_path)
-
+    frame = info["first_frame"].copy()
     xmin, ymin, xmax, ymax = bbox
 
-    # Clamp to image dimensions
-    xmin = max(0, min(xmin, width - 1))
-    xmax = max(0, min(xmax, width))
-    ymin = max(0, min(ymin, height - 1))
-    ymax = max(0, min(ymax, height))
+    overlay = frame.copy()
+    overlay[ymin:ymax, xmin:xmax] = [255, 0, 0]
+    preview = cv2.addWeighted(frame, 0.55, overlay, 0.45, 0)
 
-    if xmax <= xmin or ymax <= ymin:
-        return None
-
-    mask = np.zeros((height, width), dtype=np.uint8)
-    mask[ymin:ymax, xmin:xmax] = 255
-
-    # Create a visualization
-    preview = first_frame_rgb.copy().astype(np.float32)
-
-    # Red translucent overlay
-    red = np.zeros_like(preview)
-    red[:, :, 0] = 255
-
-    alpha = 0.45
-
-    region = mask > 0
-    preview[region] = (
-        preview[region] * (1.0 - alpha)
-        + red[region] * alpha
-    )
-
-    preview = np.clip(preview, 0, 255).astype(np.uint8)
-
-    # Draw rectangle border
     cv2.rectangle(
         preview,
         (xmin, ymin),
         (xmax - 1, ymax - 1),
         (255, 255, 0),
-        thickness=3,
+        3
     )
 
     return preview
 
 
-# ============================================================
-# MASK VIDEO CREATION
-# ============================================================
-
-def create_mask_video(video_path, bbox, output_mask_path):
-    """
-    Create a mask video with EXACTLY:
-
-        - same width
-        - same height
-        - same FPS
-        - same number of frames
-
-    as the source video.
-
-    Every frame contains:
-        black = keep
-        white = remove
-
-    FFV1 is used because the supplied read_mask() uses:
-
-        m = np.array(mask > 0)
-
-    A lossy codec can introduce small nonzero values into black
-    areas, which is bad for a binary mask.
-    """
-
-    if bbox is None:
-        raise ValueError("No bounding box was provided.")
-
+def create_mask_video(input_video, bbox, output_mask):
+    info = read_video_info(input_video)
+    width = info["width"]
+    height = info["height"]
+    fps = info["fps"]
+    bbox = clamp_bbox(bbox, width, height)
     xmin, ymin, xmax, ymax = bbox
 
-    cap = cv2.VideoCapture(video_path)
-
+    cap = cv2.VideoCapture(input_video)
     if not cap.isOpened():
-        raise RuntimeError("Could not open input video.")
-
-    fps = float(cap.get(cv2.CAP_PROP_FPS))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    if fps <= 0 or width <= 0 or height <= 0:
-        cap.release()
-        raise RuntimeError("Invalid video metadata.")
-
-    # Clamp bounding box to original video coordinates.
-    xmin = max(0, min(int(xmin), width - 1))
-    xmax = max(0, min(int(xmax), width))
-    ymin = max(0, min(int(ymin), height - 1))
-    ymax = max(0, min(int(ymax), height))
-
-    if xmax <= xmin or ymax <= ymin:
-        cap.release()
-        raise ValueError("The selected bounding box is invalid.")
-
-    # --------------------------------------------------------
-    # Use FFV1 lossless video for the mask.
-    # AVI is generally more reliable for FFV1 than MP4.
-    # --------------------------------------------------------
-    output_mask_path = str(output_mask_path)
+        raise RuntimeError(f"Could not open video: {input_video}")
 
     fourcc = cv2.VideoWriter_fourcc(*"FFV1")
-
     writer = cv2.VideoWriter(
-        output_mask_path,
+        str(output_mask),
         fourcc,
         fps,
         (width, height),
-        True,
+        True
     )
 
     if not writer.isOpened():
         cap.release()
-
         raise RuntimeError(
-            "Could not create a lossless FFV1 mask video. "
-            "Your OpenCV/FFmpeg build may not contain FFV1 support."
+            "Could not create FFV1 mask video. "
+            "Install/use an OpenCV build with FFmpeg + FFV1 support."
         )
 
     frame_count = 0
 
     while True:
-        ret, frame = cap.read()
-
+        ret, _ = cap.read()
         if not ret:
             break
 
-        # Binary mask
         mask = np.zeros((height, width), dtype=np.uint8)
-
         mask[ymin:ymax, xmin:xmax] = 255
-
-        # VideoWriter expects 3-channel frame
         mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-
         writer.write(mask_bgr)
-
         frame_count += 1
 
     cap.release()
     writer.release()
 
     if frame_count == 0:
-        raise RuntimeError("No frames were written to the mask video.")
+        raise RuntimeError(f"Empty mask generated: {output_mask}")
 
-    return output_mask_path, fps, frame_count, width, height
+    return {
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "frames": frame_count
+    }
 
 
-# ============================================================
-# OPTIONAL: VERIFY THE GENERATED MASK
-# ============================================================
-
-def verify_mask_video(mask_path, input_fps, input_frames, width, height):
-    """
-    Verify that the generated mask really matches the source
-    video dimensions, FPS and frame count.
-    """
-
+def verify_mask(mask_path, video_info):
     cap = cv2.VideoCapture(mask_path)
-
     if not cap.isOpened():
-        raise RuntimeError("Could not reopen generated mask video.")
+        raise RuntimeError(f"Could not open generated mask: {mask_path}")
 
-    mask_fps = float(cap.get(cv2.CAP_PROP_FPS))
-    mask_frames_metadata = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    mask_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    mask_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    # Count actual readable frames as an additional check.
     actual_frames = 0
-
     while True:
         ret, _ = cap.read()
-
         if not ret:
             break
-
         actual_frames += 1
 
     cap.release()
 
-    if mask_width != width or mask_height != height:
+    if width != video_info["width"] or height != video_info["height"]:
         raise RuntimeError(
             f"Mask resolution mismatch: "
-            f"mask={mask_width}x{mask_height}, "
-            f"video={width}x{height}"
+            f"{width}x{height} vs "
+            f"{video_info['width']}x{video_info['height']}"
         )
 
-    if abs(mask_fps - input_fps) > 1e-3:
+    if abs(fps - video_info["fps"]) > 1e-3:
         raise RuntimeError(
-            f"Mask FPS mismatch: mask={mask_fps}, video={input_fps}"
+            f"Mask FPS mismatch: {fps} vs {video_info['fps']}"
         )
 
-    if actual_frames != input_frames:
+    if actual_frames != video_info["n_frames"]:
         raise RuntimeError(
             f"Mask frame count mismatch: "
-            f"mask={actual_frames}, video={input_frames}"
+            f"{actual_frames} vs {video_info['n_frames']}"
         )
 
-    return True
 
-
-# ============================================================
-# MODEL INFERENCE
-# ============================================================
-
-def run_removal(video_path, annotation):
-    """
-    Full inference pipeline:
-
-        1. Read video properties
-        2. Get bounding box
-        3. Generate binary mask video
-        4. ProPainter
-        5. Diffuseraser
-        6. Return resulting video
-    """
-
-    if video_path is None:
-        raise gr.Error("Please upload a video.")
-
-    bbox = extract_box(annotation)
-
-    if bbox is None:
-        raise gr.Error(
-            "Please draw a bounding box around the object/text "
-            "you want to remove."
-        )
-
-    try:
-        (
-            _first_frame,
-            input_fps,
-            input_frame_count,
-            width,
-            height,
-            _info,
-        ) = get_video_info(video_path)
-
-        # ----------------------------------------------------
-        # Create a private working directory
-        # ----------------------------------------------------
-        work_dir = Path(
-            tempfile.mkdtemp(prefix="video_removal_")
-        )
-
-        mask_path = work_dir / "bbox_mask.avi"
-        priori_path = work_dir / "priori.mp4"
-        intermediate_output = work_dir / "diffuseraser_result.mp4"
-
-        # ----------------------------------------------------
-        # Create binary mask video
-        # ----------------------------------------------------
-        (
-            mask_path,
-            mask_fps,
-            mask_frame_count,
-            mask_width,
-            mask_height,
-        ) = create_mask_video(
-            video_path,
-            bbox,
-            mask_path,
-        )
-
-        # ----------------------------------------------------
-        # Verify mask compatibility
-        # ----------------------------------------------------
-        verify_mask_video(
-            mask_path,
-            input_fps,
-            input_frame_count,
-            width,
-            height,
-        )
+class VideoRemovalEngine:
+    def __init__(self, args):
+        self.args = args
+        self.device = get_device()
 
         print("=" * 70)
-        print("VIDEO")
-        print(f"Path       : {video_path}")
-        print(f"Resolution : {width} x {height}")
-        print(f"FPS        : {input_fps}")
-        print(f"Frames     : {input_frame_count}")
-
-        print("\nBOUNDING BOX")
-        print(f"xmin       : {bbox[0]}")
-        print(f"ymin       : {bbox[1]}")
-        print(f"xmax       : {bbox[2]}")
-        print(f"ymax       : {bbox[3]}")
-
-        print("\nMASK")
-        print(f"Path       : {mask_path}")
-        print(f"FPS        : {mask_fps}")
-        print(f"Frames     : {mask_frame_count}")
-        print(f"Resolution : {mask_width} x {mask_height}")
-
+        print("Initializing models")
+        print(f"Device: {self.device}")
         print("=" * 70)
 
-        # ----------------------------------------------------
-        # STEP 1: PROPainter
-        # ----------------------------------------------------
-        print("\nRunning ProPainter...")
+        self.video_inpainting_sd = DiffuEraser(
+            self.device,
+            args.base_model_path,
+            args.vae_path,
+            args.diffueraser_path,
+            ckpt=args.ckpt
+        )
 
-        propainter_result = propainter.forward(
-            str(video_path),
-            str(mask_path),
+        self.propainter = Propainter(
+            args.propainter_model_dir,
+            device=self.device
+        )
+
+        print("Models initialized.")
+
+    def process_one(self, input_video, input_mask, output_dir):
+        args = self.args
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        video_name = safe_filename(input_video)
+        priori_path = output_dir / f"{video_name}_priori.mp4"
+        output_path = output_dir / f"{video_name}_diffueraser_result.mp4"
+
+        print("\n" + "=" * 70)
+        print(f"Processing: {input_video}")
+        print(f"Mask     : {input_mask}")
+        print(f"Prior    : {priori_path}")
+        print(f"Output   : {output_path}")
+        print("=" * 70)
+
+        start_time = time.time()
+
+        print("Running ProPainter...")
+        self.propainter.forward(
+            input_video,
+            input_mask,
             str(priori_path),
-
-            video_length=VIDEO_LENGTH,
-            ref_stride=REF_STRIDE,
-            neighbor_length=NEIGHBOR_LENGTH,
-            subvideo_length=SUBVIDEO_LENGTH,
-            mask_dilation=MASK_DILATION_ITER,
+            video_length=args.video_length,
+            ref_stride=args.ref_stride,
+            neighbor_length=args.neighbor_length,
+            subvideo_length=args.subvideo_length,
+            mask_dilation=args.mask_dilation_iter
         )
 
-        # Some implementations return the generated path.
-        # Prefer the explicitly provided priori_path.
         if not priori_path.exists():
-
-            if isinstance(propainter_result, (str, Path)):
-                returned_path = Path(propainter_result)
-
-                if returned_path.exists():
-                    shutil.copy2(
-                        returned_path,
-                        priori_path,
-                    )
-
-            if not priori_path.exists():
-                raise RuntimeError(
-                    "ProPainter finished, but priori_path was not created:\n"
-                    f"{priori_path}"
-                )
-
-        print("ProPainter finished.")
-
-        # ----------------------------------------------------
-        # STEP 2: DIFFUSERASER
-        # ----------------------------------------------------
-        print("\nRunning Diffuseraser...")
-
-        diffuser_result = video_inpainting_sd.forward(
-            str(video_path),
-            str(mask_path),
-            str(priori_path),
-            str(intermediate_output),
-
-            max_img_size=MAX_IMG_SIZE,
-            video_length=VIDEO_LENGTH,
-            mask_dilation_iter=MASK_DILATION_ITER,
-            guidance_scale=GUIDANCE_SCALE,
-        )
-
-        # ----------------------------------------------------
-        # Determine final result
-        # ----------------------------------------------------
-        if intermediate_output.exists():
-            generated_video = intermediate_output
-
-        elif isinstance(diffuser_result, (str, Path)):
-            returned_path = Path(diffuser_result)
-
-            if returned_path.exists():
-                generated_video = returned_path
-            else:
-                raise RuntimeError(
-                    "Diffuseraser returned a path that does not exist:\n"
-                    f"{returned_path}"
-                )
-
-        else:
             raise RuntimeError(
-                "Diffuseraser finished, but no output video was found."
+                f"ProPainter did not create: {priori_path}"
             )
 
-        print("Diffuseraser finished.")
-        print(f"Generated video: {generated_video}")
-
-        # ----------------------------------------------------
-        # Copy final result into a persistent output directory.
-        # Do this because work_dir may be deleted later.
-        # ----------------------------------------------------
-        output_filename = (
-            f"removed_{uuid.uuid4().hex[:10]}.mp4"
+        print("Running DiffuEraser...")
+        self.video_inpainting_sd.forward(
+            input_video,
+            input_mask,
+            str(priori_path),
+            str(output_path),
+            max_img_size=args.max_img_size,
+            video_length=args.video_length,
+            mask_dilation_iter=args.mask_dilation_iter,
+            guidance_scale=None
         )
 
-        final_output = OUTPUT_DIR / output_filename
+        if not output_path.exists():
+            raise RuntimeError(
+                f"DiffuEraser did not create: {output_path}"
+            )
 
-        shutil.copy2(
-            generated_video,
-            final_output,
+        inference_time = time.time() - start_time
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"Finished in {inference_time:.4f} s")
+
+        return {
+            "input_video": input_video,
+            "input_mask": input_mask,
+            "priori_path": str(priori_path),
+            "output_path": str(output_path),
+            "inference_time": inference_time
+        }
+
+    def process_batch(self, input_videos, boxes, save_path):
+        if not input_videos:
+            raise ValueError("No input videos.")
+
+        if len(boxes) != len(input_videos):
+            raise ValueError(
+                f"Number of boxes ({len(boxes)}) must equal "
+                f"number of videos ({len(input_videos)})."
+            )
+
+        results = []
+        total_start = time.time()
+
+        for i, input_video in enumerate(input_videos):
+            bbox = boxes[i]
+            if bbox is None:
+                results.append({
+                    "input_video": input_video,
+                    "error": "No bounding box was selected."
+                })
+                continue
+
+            try:
+                info = read_video_info(input_video)
+                bbox = clamp_bbox(
+                    bbox,
+                    info["width"],
+                    info["height"]
+                )
+
+                video_name = safe_filename(input_video)
+                output_dir = Path(save_path) / video_name
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                mask_path = output_dir / f"{video_name}_bbox_mask.avi"
+
+                print(
+                    f"\n[{i + 1}/{len(input_videos)}] "
+                    f"Generating mask for {video_name}"
+                )
+                print(f"Bounding box: {bbox}")
+
+                create_mask_video(
+                    input_video,
+                    bbox,
+                    mask_path
+                )
+
+                verify_mask(
+                    str(mask_path),
+                    info
+                )
+
+                result = self.process_one(
+                    input_video=input_video,
+                    input_mask=str(mask_path),
+                    output_dir=output_dir
+                )
+
+                result["bbox"] = bbox
+                results.append(result)
+
+            except Exception as e:
+                traceback.print_exc()
+                results.append({
+                    "input_video": input_video,
+                    "error": str(e)
+                })
+
+        total_time = time.time() - total_start
+
+        print("\n" + "=" * 70)
+        print(
+            f"Batch completed: {len(input_videos)} videos "
+            f"in {total_time:.4f} s"
+        )
+        print("=" * 70)
+
+        return results
+
+
+def update_video_list(files):
+    paths = normalize_files(files)
+
+    if not paths:
+        return [], [], None, "", "", {}
+
+    choices = [
+        (f"{i + 1}. {Path(path).name}", i)
+        for i, path in enumerate(paths)
+    ]
+
+    boxes = {str(i): None for i in range(len(paths))}
+
+    first_info = read_video_info(paths[0])
+
+    info_text = (
+        f"Selected videos: {len(paths)}\n"
+        f"Current video: {Path(paths[0]).name}\n"
+        f"Resolution: {first_info['width']} × {first_info['height']}\n"
+        f"FPS: {first_info['fps']:.6f}\n"
+        f"Frames: {first_info['n_frames']}\n"
+        f"Duration: {first_info['duration']:.2f} s"
+    )
+
+    annotation = make_annotation(paths[0])
+
+    return (
+        paths,
+        choices,
+        0,
+        info_text,
+        "No bounding box selected.",
+        boxes,
+        annotation
+    )
+
+
+def select_video(video_index, video_paths, boxes):
+    if video_index is None or not video_paths:
+        return None, "", "No video selected.", boxes
+
+    video_index = int(video_index)
+    video_path = video_paths[video_index]
+    bbox = boxes.get(str(video_index))
+
+    info = read_video_info(video_path)
+
+    info_text = (
+        f"Video {video_index + 1}/{len(video_paths)}\n"
+        f"Name: {Path(video_path).name}\n"
+        f"Resolution: {info['width']} × {info['height']}\n"
+        f"FPS: {info['fps']:.6f}\n"
+        f"Frames: {info['n_frames']}\n"
+        f"Duration: {info['duration']:.2f} s"
+    )
+
+    annotation = make_annotation(
+        video_path,
+        bbox
+    )
+
+    return (
+        annotation,
+        info_text,
+        format_bbox(bbox),
+        boxes
+    )
+
+
+def save_current_bbox(video_index, annotation, boxes):
+    if video_index is None:
+        return boxes, "No video selected."
+
+    bbox = get_bbox(annotation)
+    if bbox is None:
+        boxes[str(video_index)] = None
+        return boxes, "No bounding box selected."
+
+    boxes[str(video_index)] = bbox
+    return boxes, format_bbox(bbox)
+
+
+def update_preview(video_index, annotation, video_paths):
+    if video_index is None or not video_paths:
+        return None
+
+    bbox = get_bbox(annotation)
+    if bbox is None:
+        return None
+
+    return make_preview(
+        video_paths[int(video_index)],
+        bbox
+    )
+
+
+def run_gui(input_videos, boxes, engine, save_path):
+    if not input_videos:
+        raise gr.Error("Upload at least one video.")
+
+    if not boxes:
+        raise gr.Error("No bounding boxes have been created.")
+
+    bbox_list = []
+
+    for i in range(len(input_videos)):
+        bbox = boxes.get(str(i))
+        if bbox is None:
+            raise gr.Error(
+                f"Please draw a bounding box for video "
+                f"{i + 1}: {Path(input_videos[i]).name}"
+            )
+        bbox_list.append(tuple(bbox))
+
+    results = engine.process_batch(
+        input_videos=input_videos,
+        boxes=bbox_list,
+        save_path=save_path
+    )
+
+    successful = [
+        r for r in results
+        if r.get("output_path") and Path(r["output_path"]).exists()
+    ]
+
+    failed = [
+        r for r in results
+        if r.get("error")
+    ]
+
+    result_files = [
+        r["output_path"]
+        for r in successful
+    ]
+
+    first_result = (
+        result_files[0]
+        if result_files
+        else None
+    )
+
+    lines = [
+        "Processing complete.",
+        f"Videos: {len(input_videos)}",
+        f"Successful: {len(successful)}",
+        f"Failed: {len(failed)}",
+        ""
+    ]
+
+    for result in results:
+        name = Path(result["input_video"]).name
+
+        if result.get("output_path"):
+            lines.append(f"[OK] {name}")
+            lines.append(
+                f"     bbox = {result['bbox']}"
+            )
+            lines.append(
+                f"     output = {result['output_path']}"
+            )
+        else:
+            lines.append(
+                f"[FAILED] {name}: {result.get('error')}"
+            )
+
+    return (
+        result_files,
+        first_result,
+        "\n".join(lines)
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--input_video",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional initial video list."
+    )
+
+    parser.add_argument(
+        "--video_length",
+        type=int,
+        default=10
+    )
+    parser.add_argument(
+        "--mask_dilation_iter",
+        type=int,
+        default=8
+    )
+    parser.add_argument(
+        "--max_img_size",
+        type=int,
+        default=960
+    )
+    parser.add_argument(
+        "--ref_stride",
+        type=int,
+        default=10
+    )
+    parser.add_argument(
+        "--neighbor_length",
+        type=int,
+        default=10
+    )
+    parser.add_argument(
+        "--subvideo_length",
+        type=int,
+        default=50
+    )
+    parser.add_argument(
+        "--ckpt",
+        type=str,
+        default="2-Step"
+    )
+
+    parser.add_argument(
+        "--base_model_path",
+        type=str,
+        default=f"{WEIGHTS}/stable-diffusion-v1-5"
+    )
+    parser.add_argument(
+        "--vae_path",
+        type=str,
+        default=f"{WEIGHTS}/sd-vae-ft-mse"
+    )
+    parser.add_argument(
+        "--diffueraser_path",
+        type=str,
+        default=f"{WEIGHTS}/diffuEraser"
+    )
+    parser.add_argument(
+        "--propainter_model_dir",
+        type=str,
+        default=f"{WEIGHTS}/propainter"
+    )
+
+    parser.add_argument(
+        "--save_path",
+        type=str,
+        default="./outputs"
+    )
+    parser.add_argument(
+        "--server_name",
+        type=str,
+        default="0.0.0.0"
+    )
+    parser.add_argument(
+        "--server_port",
+        type=int,
+        default=8000
+    )
+    parser.add_argument(
+        "--share",
+        action="store_true"
+    )
+
+    return parser
+
+
+def build_demo(engine, save_path):
+    title = """
+    <div style="text-align:center;font-size:34px;font-family:Arial,sans-serif;font-weight:bold;">
+        Video Object / Text Remover
+    </div>
+    <div style="text-align:center;font-size:16px;color:#666;margin:10px 0 20px;">
+        Upload multiple videos and draw a separate removal box for each video.
+    </div>
+    """
+
+    instructions = """
+    ### Workflow
+    **1. Upload videos** → **2. Select a video** → **3. Draw its box** → **4. Select the next video** → **5. Draw its box** → **6. Remove Objects**
+
+    Each video has its own bounding box and its own automatically generated mask.
+    """
+
+    css = """
+    #main {max-width:1200px;margin:auto;}
+    #remove_btn {width:60%;margin:15px auto;display:block;font-size:20px;}
+    .mono textarea {font-family:monospace !important;}
+    footer {display:none !important;}
+    """
+
+    with gr.Blocks(
+        title="Video Object Remover",
+        theme=gr.themes.Soft(),
+        css=css
+    ) as demo:
+        video_state = gr.State([])
+        boxes_state = gr.State({})
+
+        gr.HTML(title)
+        gr.Markdown(instructions)
+
+        videos = gr.File(
+            label="1. Upload Video(s)",
+            file_count="multiple",
+            file_types=[
+                ".mp4",
+                ".mov",
+                ".avi",
+                ".mkv",
+                ".webm"
+            ],
+            type="filepath"
         )
 
-        # Cleanup intermediate files
-        try:
-            shutil.rmtree(work_dir)
-        except Exception:
-            pass
-
-        return str(final_output)
-
-    except gr.Error:
-        raise
-
-    except Exception as e:
-        print("\nERROR DURING INFERENCE:")
-        import traceback
-        traceback.print_exc()
-
-        raise gr.Error(
-            f"Video removal failed:\n\n{str(e)}"
-        )
-
-
-# ============================================================
-# UI
-# ============================================================
-
-TITLE_HTML = """
-<div style="
-    text-align:center;
-    font-size:36px;
-    font-family:Arial, Helvetica, sans-serif;
-    font-weight:700;
-    margin-top:10px;
-">
-    Video Object / Text Remover
-</div>
-
-<div style="
-    text-align:center;
-    font-size:17px;
-    font-family:Arial, Helvetica, sans-serif;
-    color:#666;
-    margin-top:8px;
-    margin-bottom:20px;
-">
-    Upload a video, draw one box around the object or text,
-    and run video inpainting.
-</div>
-"""
-
-
-INSTRUCTIONS = """
-### How to use
-
-1. Upload a video.
-2. The first frame will appear automatically.
-3. Draw **one bounding box** around the object/text to remove.
-4. Press **Remove Object**.
-5. The same bounding box is used for every video frame.
-
-The red preview shows the region that will become the removal mask.
-"""
-
-
-CSS = """
-#main-container {
-    max-width: 1200px;
-    margin: auto;
-}
-
-#video-input,
-#annotator,
-#mask-preview,
-#result-video {
-    width: 100%;
-}
-
-#remove-button {
-    width: 60%;
-    margin: 15px auto;
-    display: block;
-    font-size: 20px;
-}
-
-.status-box textarea {
-    font-family: monospace !important;
-}
-
-footer {
-    display: none !important;
-}
-"""
-
-
-with gr.Blocks(
-    title="Video Object Remover",
-    css=CSS,
-    theme=gr.themes.Soft(),
-) as demo:
-
-    with gr.Column(elem_id="main-container"):
-
-        gr.HTML(TITLE_HTML)
-
-        gr.Markdown(INSTRUCTIONS)
-
-        # ----------------------------------------------------
-        # Video
-        # ----------------------------------------------------
-        video_input = gr.Video(
-            label="1. Upload Video",
-            sources=["upload"],
-            format="mp4",
-            elem_id="video-input",
+        video_selector = gr.Dropdown(
+            label="2. Select Video to Annotate",
+            choices=[],
+            type="value",
+            value=None
         )
 
         video_info = gr.Textbox(
             label="Video Information",
-            lines=4,
+            lines=6,
             interactive=False,
-            elem_classes=["status-box"],
+            elem_classes="mono"
         )
 
-        # ----------------------------------------------------
-        # First frame + Bounding box
-        # ----------------------------------------------------
-        gr.Markdown(
-            "### 2. Draw the removal box\n"
-            "Drag a rectangle around the object or text you want removed."
-        )
-
-        bbox_editor = image_annotator(
+        annotation = image_annotator(
             value=None,
-            label="First Frame — Draw Bounding Box",
+            label="3. Draw Bounding Box",
             single_box=True,
             disable_edit_boxes=True,
-            show_remove_button=True,
             box_min_size=5,
             box_thickness=3,
             box_selected_thickness=4,
             height=600,
             width=1000,
+            show_clear_button=True,
+            show_remove_button=True
         )
 
-        bbox_coordinates = gr.Textbox(
-            label="Selected Bounding Box",
+        bbox_text = gr.Textbox(
+            label="Current Bounding Box",
             lines=6,
             interactive=False,
-            placeholder="Draw a box above...",
-            elem_classes=["status-box"],
+            elem_classes="mono"
         )
 
-        # ----------------------------------------------------
-        # Mask Preview
-        # ----------------------------------------------------
         mask_preview = gr.Image(
-            label="Mask Preview",
-            type="numpy",
+            label="Mask Preview — Red Area Will Be Removed",
             interactive=False,
-            height=500,
-            elem_id="mask-preview",
+            height=450
         )
 
-        # ----------------------------------------------------
-        # Remove
-        # ----------------------------------------------------
-        remove_button = gr.Button(
-            "Remove Object",
+        gr.Markdown(
+            "Draw a box for **every video** before clicking Remove Objects."
+        )
+
+        remove_btn = gr.Button(
+            "Remove Objects",
             variant="primary",
-            elem_id="remove-button",
             size="lg",
+            elem_id="remove_btn"
         )
 
-        # ----------------------------------------------------
-        # Output
-        # ----------------------------------------------------
+        status = gr.Textbox(
+            label="Processing Status",
+            lines=15,
+            interactive=False,
+            elem_classes="mono"
+        )
+
         result_video = gr.Video(
-            label="Result",
-            autoplay=False,
-            elem_id="result-video",
+            label="First Result"
         )
 
-        # ----------------------------------------------------
-        # EVENTS
-        # ----------------------------------------------------
+        result_files = gr.Files(
+            label="All Results"
+        )
 
-        # Automatically extract first frame after video upload
-        video_input.change(
-            fn=load_video,
-            inputs=video_input,
+        videos.change(
+            fn=update_video_list,
+            inputs=videos,
             outputs=[
-                bbox_editor,
+                video_state,
+                video_selector,
+                video_selector,
                 video_info,
-            ],
+                bbox_text,
+                boxes_state,
+                annotation
+            ]
         )
 
-        # Update coordinate display
-        bbox_editor.change(
-            fn=show_bbox,
-            inputs=bbox_editor,
-            outputs=bbox_coordinates,
-        )
-
-        # Update mask visualization
-        bbox_editor.change(
-            fn=make_mask_preview,
+        video_selector.change(
+            fn=select_video,
             inputs=[
-                video_input,
-                bbox_editor,
+                video_selector,
+                video_state,
+                boxes_state
             ],
-            outputs=mask_preview,
+            outputs=[
+                annotation,
+                video_info,
+                bbox_text,
+                boxes_state
+            ]
         )
 
-        # Run actual inference
-        remove_button.click(
-            fn=run_removal,
+        annotation.change(
+            fn=save_current_bbox,
             inputs=[
-                video_input,
-                bbox_editor,
+                video_selector,
+                annotation,
+                boxes_state
             ],
-            outputs=result_video,
+            outputs=[
+                boxes_state,
+                bbox_text
+            ]
         )
 
+        annotation.change(
+            fn=update_preview,
+            inputs=[
+                video_selector,
+                annotation,
+                video_state
+            ],
+            outputs=mask_preview
+        )
 
-# ============================================================
-# LAUNCH
-# ============================================================
+        remove_btn.click(
+            fn=lambda input_videos, boxes: run_gui(
+                input_videos,
+                boxes,
+                engine,
+                save_path
+            ),
+            inputs=[
+                video_state,
+                boxes_state
+            ],
+            outputs=[
+                result_files,
+                result_video,
+                status
+            ]
+        )
 
-if __name__ == "__main__":
+    return demo
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    os.makedirs(
+        args.save_path,
+        exist_ok=True
+    )
+
+    engine = VideoRemovalEngine(args)
+
+    demo = build_demo(
+        engine=engine,
+        save_path=args.save_path
+    )
+
     demo.queue()
 
+    initial_files = args.input_video
+
+    if initial_files:
+        # These files are only used as the initial GUI video list.
+        # The masks still MUST be created through the GUI.
+        initial_files = [
+            str(Path(x).resolve())
+            for x in initial_files
+        ]
+
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=8000,
-
-        # Set True if you need a public Gradio share URL.
-        share=True,
-
-        show_error=True,
+        server_name=args.server_name,
+        server_port=args.server_port,
+        share=args.share,
+        show_error=True
     )
+
+
+if __name__ == "__main__":
+    main()
