@@ -1138,6 +1138,57 @@ def build_parser():
     return parser
 
 
+def load_selected_video(video_path, state):
+    if not video_path:
+        raise gr.Error("Please select a video first.")
+
+    if not os.path.exists(video_path):
+        raise gr.Error(f"Video does not exist:\n{video_path}")
+
+    try:
+        info = read_video_info(video_path)
+    except Exception as e:
+        raise gr.Error(str(e))
+
+    # Create/initialize state for this video
+    state = {
+        "originals": [video_path],
+        "current": [video_path],
+        "boxes": [None],
+        "trims": [(0.0, info["duration"])]
+    }
+
+    annotation = make_annotation(video_path)
+
+    video_info = (
+        f"Name: {Path(video_path).name}\n"
+        f"Resolution: {info['width']} × {info['height']}\n"
+        f"FPS: {info['fps']:.6f}\n"
+        f"Frames: {info['n_frames']}\n"
+        f"Duration: {info['duration']:.2f} s"
+    )
+
+    return (
+        state,
+        video_path,
+        annotation,
+        video_info,
+        bbox_text(None),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=0
+        ),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=info["duration"]
+        ),
+        None,
+        "Video loaded successfully. Draw a bounding box."
+    )
+
+
 def build_demo(engine, save_path):
     css = """
     .gradio-container {
@@ -1226,10 +1277,17 @@ def build_demo(engine, save_path):
                 ],
                 type="filepath"
             )
+
             video_selector = gr.Dropdown(
-                label="Current Video",
-                choices=glob.glob("/scratch/rohhs/downloads/yt-dlp/*.mp4"),
-                value=None
+                label="Select Video",
+                choices=sorted(glob.glob("/scratch/rohhs/downloads/yt-dlp/*.mp4")),
+                value=None,
+                interactive=True
+            )
+
+            load_video_button = gr.Button(
+                "📂 Load Video",
+                variant="primary"
             )
 
         with gr.Column(elem_classes="section"):
@@ -1430,6 +1488,25 @@ def build_demo(engine, save_path):
                 annotation,
                 video_info,
                 bbox_coordinates,
+                mask_preview,
+                trim_status
+            ]
+        )
+
+        load_video_button.click(
+            fn=load_selected_video,
+            inputs=[
+                video_selector,
+                session_state
+            ],
+            outputs=[
+                session_state,
+                current_video,
+                annotation,
+                video_info,
+                bbox_coordinates,
+                start_slider,
+                end_slider,
                 mask_preview,
                 trim_status
             ]
