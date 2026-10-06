@@ -1,7 +1,10 @@
 import os
 import re
 import time
+import uuid
+import shutil
 import argparse
+import subprocess
 import traceback
 from pathlib import Path
 
@@ -13,6 +16,9 @@ from gradio_image_annotation import image_annotator
 
 from diffueraser.diffueraser import DiffuEraser
 from propainter.inference import Propainter, get_device
+
+
+WEIGHTS = os.getenv("HF_HUB", "weights")
 
 
 def safe_filename(path):
@@ -37,7 +43,19 @@ def normalize_files(files):
         return []
     if not isinstance(files, list):
         files = [files]
-    return [get_path(f) for f in files if get_path(f)]
+    paths = []
+    for f in files:
+        p = get_path(f)
+        if p:
+            paths.append(p)
+    return paths
+
+
+def require_ffmpeg():
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError(
+            "FFmpeg was not found in PATH. Install FFmpeg first."
+        )
 
 
 def read_video_info(video_path):
@@ -69,6 +87,7 @@ def read_video_info(video_path):
         "duration": n_frames / fps
     }
 
+
 def get_bbox(annotation):
     if not isinstance(annotation, dict):
         return None
@@ -78,136 +97,64 @@ def get_bbox(annotation):
         return None
 
     box = boxes[0]
-
-    bbox = (
-        float(box["xmin"]),
-        float(box["ymin"]),
-        float(box["xmax"]),
-        float(box["ymax"])
+    return (
+        int(round(float(box["xmin"]))),
+        int(round(float(box["ymin"]))),
+        int(round(float(box["xmax"]))),
+        int(round(float(box["ymax"])))
     )
 
-    # image_annotator returns the annotated image too.
-    # We use it to remember the coordinate system in which
-    # the user drew the box.
-    image = annotation.get("image")
-
-    image_width = None
-    image_height = None
-
-    if isinstance(image, np.ndarray):
-        image_height, image_width = image.shape[:2]
-
-    return {
-        "bbox": bbox,
-        "width": image_width,
-        "height": image_height
-    }
 
 def clamp_bbox(bbox, width, height):
     xmin, ymin, xmax, ymax = bbox
-
-    xmin = int(round(xmin))
-    ymin = int(round(ymin))
-    xmax = int(round(xmax))
-    ymax = int(round(ymax))
-
-    xmin = max(0, min(xmin, width - 1))
-    ymin = max(0, min(ymin, height - 1))
-    xmax = max(1, min(xmax, width))
-    ymax = max(1, min(ymax, height))
+    xmin = max(0, min(int(xmin), width - 1))
+    ymin = max(0, min(int(ymin), height - 1))
+    xmax = max(1, min(int(xmax), width))
+    ymax = max(1, min(int(ymax), height))
 
     if xmax <= xmin or ymax <= ymin:
         raise ValueError(
-            f"Invalid bounding box after clamping: "
-            f"{(xmin, ymin, xmax, ymax)} "
-            f"for frame size {width}x{height}"
+            f"Invalid bounding box {bbox} for {width}x{height} video."
         )
-
     return xmin, ymin, xmax, ymax
 
-def convert_bbox_to_video(
-    bbox_info,
-    video_width,
-    video_height
-):
-    bbox = bbox_info["bbox"]
 
-    source_width = bbox_info.get("width")
-    source_height = bbox_info.get("height")
-
-    # Normally the annotation image and video have identical
-    # dimensions, so no scaling is needed.
-    if (
-        source_width is None
-        or source_height is None
-    ):
-        return clamp_bbox(
-            bbox,
-            video_width,
-            video_height
-        )
-
-    sx = video_width / float(source_width)
-    sy = video_height / float(source_height)
-
-    xmin, ymin, xmax, ymax = bbox
-
-    converted = (
-        xmin * sx,
-        ymin * sy,
-        xmax * sx,
-        ymax * sy
-    )
-
-    return clamp_bbox(
-        converted,
-        video_width,
-        video_height
-    )
-
-def format_bbox(bbox_info):
-    if bbox_info is None:
+def bbox_text(bbox):
+    if bbox is None:
         return "No bounding box selected."
-
-    bbox = bbox_info["bbox"]
     xmin, ymin, xmax, ymax = bbox
-
-    text = (
-        f"xmin = {int(round(xmin))}\n"
-        f"ymin = {int(round(ymin))}\n"
-        f"xmax = {int(round(xmax))}\n"
-        f"ymax = {int(round(ymax))}\n"
-        f"width = {int(round(xmax - xmin))}\n"
-        f"height = {int(round(ymax - ymin))}"
+    return (
+        f"xmin = {xmin}\n"
+        f"ymin = {ymin}\n"
+        f"xmax = {xmax}\n"
+        f"ymax = {ymax}\n"
+        f"width = {xmax - xmin}\n"
+        f"height = {ymax - ymin}"
     )
 
-    if bbox_info.get("width") is not None:
-        text += (
-            f"\n\nAnnotation frame: "
-            f"{bbox_info['width']} x "
-            f"{bbox_info['height']}"
-        )
-
-    return text
 
 def make_annotation(video_path, bbox=None):
     info = read_video_info(video_path)
-    value = {
+    data = {
         "image": info["first_frame"],
         "boxes": []
     }
 
     if bbox is not None:
-        bbox = clamp_bbox(bbox, info["width"], info["height"])
+        bbox = clamp_bbox(
+            bbox,
+            info["width"],
+            info["height"]
+        )
         xmin, ymin, xmax, ymax = bbox
-        value["boxes"] = [{
+        data["boxes"] = [{
             "xmin": xmin,
             "ymin": ymin,
             "xmax": xmax,
             "ymax": ymax
         }]
 
-    return value
+    return data
 
 
 def make_preview(video_path, bbox):
@@ -215,14 +162,24 @@ def make_preview(video_path, bbox):
         return None
 
     info = read_video_info(video_path)
-    bbox = clamp_bbox(bbox, info["width"], info["height"])
+    bbox = clamp_bbox(
+        bbox,
+        info["width"],
+        info["height"]
+    )
 
     frame = info["first_frame"].copy()
     xmin, ymin, xmax, ymax = bbox
 
     overlay = frame.copy()
     overlay[ymin:ymax, xmin:xmax] = [255, 0, 0]
-    preview = cv2.addWeighted(frame, 0.55, overlay, 0.45, 0)
+    preview = cv2.addWeighted(
+        frame,
+        0.55,
+        overlay,
+        0.45,
+        0
+    )
 
     cv2.rectangle(
         preview,
@@ -235,36 +192,79 @@ def make_preview(video_path, bbox):
     return preview
 
 
-def create_mask_video(input_video, bbox, output_mask):
-    cap = cv2.VideoCapture(input_video)
+def trim_video(
+    input_video,
+    start_time,
+    end_time,
+    output_path
+):
+    require_ffmpeg()
 
-    if not cap.isOpened():
-        raise RuntimeError(
-            f"Could not open video: {input_video}"
+    info = read_video_info(input_video)
+    duration = info["duration"]
+
+    start_time = max(0.0, float(start_time))
+    end_time = min(float(end_time), duration)
+
+    if end_time <= start_time:
+        raise ValueError(
+            f"End time ({end_time:.3f}) must be greater than "
+            f"start time ({start_time:.3f})."
         )
 
-    # Read the actual first decoded frame.
-    ret, first_frame = cap.read()
+    # If the whole video is selected, no need to create another file.
+    if (
+        abs(start_time) < 1e-6
+        and abs(end_time - duration) < 1.0 / max(info["fps"], 1.0)
+    ):
+        shutil.copy2(input_video, output_path)
+        return output_path
 
-    if not ret:
-        cap.release()
-        raise RuntimeError(
-            f"Could not read first frame: {input_video}"
-        )
+    clip_duration = end_time - start_time
 
-    # Use the actual decoded frame dimensions rather than
-    # relying only on CAP_PROP_FRAME_WIDTH/HEIGHT.
-    height, width = first_frame.shape[:2]
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss", f"{start_time:.6f}",
+        "-i", input_video,
+        "-t", f"{clip_duration:.6f}",
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        output_path
+    ]
 
-    fps = float(
-        cap.get(cv2.CAP_PROP_FPS)
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
     )
 
-    if fps <= 0:
-        cap.release()
+    if result.returncode != 0:
         raise RuntimeError(
-            f"Invalid FPS: {input_video}"
+            "FFmpeg failed while cutting the video:\n\n"
+            + result.stderr[-4000:]
         )
+
+    if not os.path.exists(output_path):
+        raise RuntimeError(
+            f"FFmpeg completed but output was not created: {output_path}"
+        )
+
+    return output_path
+
+
+def create_mask_video(input_video, bbox, output_mask):
+    info = read_video_info(input_video)
+    width = info["width"]
+    height = info["height"]
+    fps = info["fps"]
 
     bbox = clamp_bbox(
         bbox,
@@ -274,8 +274,12 @@ def create_mask_video(input_video, bbox, output_mask):
 
     xmin, ymin, xmax, ymax = bbox
 
-    fourcc = cv2.VideoWriter_fourcc(*"FFV1")
+    cap = cv2.VideoCapture(input_video)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {input_video}")
 
+    # Lossless mask because read_mask() uses mask > 0.
+    fourcc = cv2.VideoWriter_fourcc(*"FFV1")
     writer = cv2.VideoWriter(
         str(output_mask),
         fourcc,
@@ -287,31 +291,14 @@ def create_mask_video(input_video, bbox, output_mask):
     if not writer.isOpened():
         cap.release()
         raise RuntimeError(
-            "Could not create FFV1 mask video."
+            "Could not create FFV1 mask video. "
+            "Your FFmpeg/OpenCV build may not support FFV1."
         )
 
-    frame_count = 0
+    frames = 0
 
-    # Write mask for the first frame.
-    mask = np.zeros(
-        (height, width),
-        dtype=np.uint8
-    )
-
-    mask[ymin:ymax, xmin:xmax] = 255
-
-    mask_bgr = cv2.cvtColor(
-        mask,
-        cv2.COLOR_GRAY2BGR
-    )
-
-    writer.write(mask_bgr)
-    frame_count += 1
-
-    # Process remaining frames.
     while True:
         ret, _ = cap.read()
-
         if not ret:
             break
 
@@ -319,56 +306,59 @@ def create_mask_video(input_video, bbox, output_mask):
             (height, width),
             dtype=np.uint8
         )
-
         mask[ymin:ymax, xmin:xmax] = 255
 
         mask_bgr = cv2.cvtColor(
             mask,
             cv2.COLOR_GRAY2BGR
         )
-
         writer.write(mask_bgr)
-        frame_count += 1
+        frames += 1
 
     cap.release()
     writer.release()
 
-    if frame_count == 0:
+    if frames == 0:
         raise RuntimeError(
-            f"No frames written to mask: {output_mask}"
+            f"No mask frames generated: {output_mask}"
         )
 
     return {
         "fps": fps,
         "width": width,
         "height": height,
-        "frames": frame_count
+        "frames": frames
     }
 
 
 def verify_mask(mask_path, video_info):
     cap = cv2.VideoCapture(mask_path)
     if not cap.isOpened():
-        raise RuntimeError(f"Could not open generated mask: {mask_path}")
+        raise RuntimeError(
+            f"Could not open generated mask: {mask_path}"
+        )
 
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    actual_frames = 0
+    n_frames = 0
     while True:
         ret, _ = cap.read()
         if not ret:
             break
-        actual_frames += 1
+        n_frames += 1
 
     cap.release()
 
-    if width != video_info["width"] or height != video_info["height"]:
+    if width != video_info["width"]:
         raise RuntimeError(
-            f"Mask resolution mismatch: "
-            f"{width}x{height} vs "
-            f"{video_info['width']}x{video_info['height']}"
+            f"Mask width mismatch: {width} vs {video_info['width']}"
+        )
+
+    if height != video_info["height"]:
+        raise RuntimeError(
+            f"Mask height mismatch: {height} vs {video_info['height']}"
         )
 
     if abs(fps - video_info["fps"]) > 1e-3:
@@ -376,11 +366,71 @@ def verify_mask(mask_path, video_info):
             f"Mask FPS mismatch: {fps} vs {video_info['fps']}"
         )
 
-    if actual_frames != video_info["n_frames"]:
+    if n_frames != video_info["n_frames"]:
         raise RuntimeError(
-            f"Mask frame count mismatch: "
-            f"{actual_frames} vs {video_info['n_frames']}"
+            f"Mask frame count mismatch: {n_frames} vs "
+            f"{video_info['n_frames']}"
         )
+
+
+def ensure_output_resolution(
+    output_video,
+    target_width,
+    target_height
+):
+    """
+    DiffuEraser can internally resize according to max_img_size.
+    This function makes the final file spatially match the
+    trimmed input resolution.
+    """
+    require_ffmpeg()
+
+    info = read_video_info(output_video)
+
+    if (
+        info["width"] == target_width
+        and info["height"] == target_height
+    ):
+        return output_video
+
+    temp_output = (
+        str(Path(output_video).with_suffix("")) +
+        "_resized.mp4"
+    )
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", output_video,
+        "-vf", f"scale={target_width}:{target_height}:flags=lanczos",
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        temp_output
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "FFmpeg failed while restoring output resolution:\n\n"
+            + result.stderr[-4000:]
+        )
+
+    shutil.move(
+        temp_output,
+        output_video
+    )
+
+    return output_video
 
 
 class VideoRemovalEngine:
@@ -389,7 +439,7 @@ class VideoRemovalEngine:
         self.device = get_device()
 
         print("=" * 70)
-        print("Initializing models")
+        print("Initializing ProPainter + DiffuEraser")
         print(f"Device: {self.device}")
         print("=" * 70)
 
@@ -408,20 +458,31 @@ class VideoRemovalEngine:
 
         print("Models initialized.")
 
-    def process_one(self, input_video, input_mask, output_dir):
+    def process_one(
+        self,
+        input_video,
+        input_mask,
+        output_dir
+    ):
         args = self.args
         output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
-        video_name = safe_filename(input_video)
-        priori_path = output_dir / f"{video_name}_priori.mp4"
-        output_path = output_dir / f"{video_name}_diffueraser_result.mp4"
+        name = safe_filename(input_video)
+        priori_path = output_dir / f"{name}_priori.mp4"
+        output_path = output_dir / f"{name}_diffueraser_result.mp4"
+
+        input_info = read_video_info(input_video)
 
         print("\n" + "=" * 70)
         print(f"Processing: {input_video}")
-        print(f"Mask     : {input_mask}")
-        print(f"Prior    : {priori_path}")
-        print(f"Output   : {output_path}")
+        print(f"Mask: {input_mask}")
+        print(f"Input: {input_info['width']}x{input_info['height']}")
+        print(f"FPS: {input_info['fps']}")
+        print(f"Frames: {input_info['n_frames']}")
         print("=" * 70)
 
         start_time = time.time()
@@ -460,55 +521,76 @@ class VideoRemovalEngine:
                 f"DiffuEraser did not create: {output_path}"
             )
 
-        inference_time = time.time() - start_time
+        # Restore the spatial resolution if DiffuEraser resized it.
+        ensure_output_resolution(
+            str(output_path),
+            input_info["width"],
+            input_info["height"]
+        )
+
+        elapsed = time.time() - start_time
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        print(f"Finished in {inference_time:.4f} s")
+        print(f"Finished in {elapsed:.4f} s")
 
         return {
             "input_video": input_video,
             "input_mask": input_mask,
             "priori_path": str(priori_path),
             "output_path": str(output_path),
-            "inference_time": inference_time
+            "inference_time": elapsed
         }
 
-    def process_batch(self, input_videos, boxes, save_path):
+    def process_batch(
+        self,
+        input_videos,
+        boxes,
+        save_path
+    ):
         if not input_videos:
-            raise ValueError("No input videos.")
+            raise ValueError("No videos were uploaded.")
 
         if len(boxes) != len(input_videos):
             raise ValueError(
-                f"Number of boxes ({len(boxes)}) must equal "
-                f"number of videos ({len(input_videos)})."
+                "The number of bounding boxes must equal "
+                "the number of videos."
             )
+
+        session_id = uuid.uuid4().hex[:10]
+        session_dir = Path(save_path) / f"session_{session_id}"
+        session_dir.mkdir(
+            parents=True,
+            exist_ok=True
+        )
 
         results = []
         total_start = time.time()
 
         for i, input_video in enumerate(input_videos):
-            bbox_info = boxes[i]
-
-            if bbox_info is None:
-                results.append({
-                    "input_video": input_video,
-                    "error": "No bounding box was selected."
-                })
-                continue
+            print(
+                f"\n[{i + 1}/{len(input_videos)}] "
+                f"Processing video"
+            )
 
             try:
-                info = read_video_info(input_video)
+                bbox = boxes[i]
+                if bbox is None:
+                    raise ValueError(
+                        f"No bounding box selected for "
+                        f"{Path(input_video).name}"
+                    )
 
-                bbox = convert_bbox_to_video(
-                    bbox_info,
+                info = read_video_info(input_video)
+                bbox = clamp_bbox(
+                    bbox,
                     info["width"],
                     info["height"]
                 )
 
                 video_name = safe_filename(input_video)
-                output_dir = Path(save_path) / video_name
+                output_dir = session_dir / video_name
                 output_dir.mkdir(
                     parents=True,
                     exist_ok=True
@@ -519,17 +601,10 @@ class VideoRemovalEngine:
                     f"{video_name}_bbox_mask.avi"
                 )
 
-                print(
-                    f"\n[{i + 1}/{len(input_videos)}] "
-                    f"Generating mask for {video_name}"
-                )
-                print(f"Video size: {info['width']}x{info['height']}")
-                print(f"Bounding box: {bbox}")
-
                 create_mask_video(
-                    input_video=input_video,
-                    bbox=bbox,
-                    output_mask=str(mask_path)
+                    input_video,
+                    bbox,
+                    str(mask_path)
                 )
 
                 verify_mask(
@@ -540,17 +615,15 @@ class VideoRemovalEngine:
                 result = self.process_one(
                     input_video=input_video,
                     input_mask=str(mask_path),
-                    output_dir=output_dir
+                    output_dir=str(output_dir)
                 )
 
                 result["bbox"] = bbox
                 result["mask_path"] = str(mask_path)
-
                 results.append(result)
 
             except Exception as e:
                 traceback.print_exc()
-
                 results.append({
                     "input_video": input_video,
                     "error": str(e)
@@ -560,232 +633,428 @@ class VideoRemovalEngine:
 
         print("\n" + "=" * 70)
         print(
-            f"Batch completed: {len(input_videos)} videos "
-            f"in {total_time:.4f} s"
+            f"Batch finished: {len(input_videos)} videos "
+            f"in {total_time:.2f} seconds"
         )
         print("=" * 70)
 
         return results
 
-def update_video_list(files):
+
+def create_initial_state(files):
     paths = normalize_files(files)
 
     if not paths:
-        return [], [], None, "", "", {}
+        return {
+            "originals": [],
+            "current": [],
+            "boxes": [],
+            "trims": []
+        }
+
+    trims = []
+    for path in paths:
+        info = read_video_info(path)
+        trims.append((0.0, info["duration"]))
+
+    return {
+        "originals": paths,
+        "current": paths.copy(),
+        "boxes": [None] * len(paths),
+        "trims": trims
+    }
+
+
+def upload_videos(files):
+    state = create_initial_state(files)
+    paths = state["current"]
+
+    if not paths:
+        return (
+            state,
+            gr.update(choices=[], value=None),
+            None,
+            None,
+            None,
+            None,
+            gr.update(minimum=0, maximum=1, value=0),
+            gr.update(minimum=1, maximum=1, value=1),
+            "No video selected.",
+            "No bounding box selected."
+        )
 
     choices = [
-        (f"{i + 1}. {Path(path).name}", i)
-        for i, path in enumerate(paths)
+        (f"{i + 1}. {Path(p).name}", i)
+        for i, p in enumerate(paths)
     ]
 
-    boxes = {str(i): None for i in range(len(paths))}
+    path = paths[0]
+    info = read_video_info(path)
+    annotation = make_annotation(path)
+    trim_end = info["duration"]
 
-    first_info = read_video_info(paths[0])
-
-    info_text = (
-        f"Selected videos: {len(paths)}\n"
-        f"Current video: {Path(paths[0]).name}\n"
-        f"Resolution: {first_info['width']} × {first_info['height']}\n"
-        f"FPS: {first_info['fps']:.6f}\n"
-        f"Frames: {first_info['n_frames']}\n"
-        f"Duration: {first_info['duration']:.2f} s"
-    )
-
-    annotation = make_annotation(paths[0])
-
-    return (
-        paths,
-        choices,
-        0,
-        info_text,
-        "No bounding box selected.",
-        boxes,
-        annotation
-    )
-
-
-def select_video(video_index, video_paths, boxes):
-    if video_index is None or not video_paths:
-        return None, "", "No video selected.", boxes
-
-    video_index = int(video_index)
-    video_path = video_paths[video_index]
-    bbox = boxes.get(str(video_index))
-
-    info = read_video_info(video_path)
-
-    info_text = (
-        f"Video {video_index + 1}/{len(video_paths)}\n"
-        f"Name: {Path(video_path).name}\n"
+    video_info = (
+        f"Video 1/{len(paths)}\n"
+        f"Name: {Path(path).name}\n"
         f"Resolution: {info['width']} × {info['height']}\n"
         f"FPS: {info['fps']:.6f}\n"
         f"Frames: {info['n_frames']}\n"
         f"Duration: {info['duration']:.2f} s"
     )
 
+    return (
+        state,
+        gr.update(
+            choices=choices,
+            value=0
+        ),
+        path,
+        annotation,
+        video_info,
+        "No bounding box selected.",
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=0
+        ),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=trim_end
+        ),
+        f"Loaded {len(paths)} video(s).",
+        bbox_text(None)
+    )
+
+
+def select_video(
+    video_index,
+    state
+):
+    if video_index is None or not state["current"]:
+        return (
+            None,
+            None,
+            "No video selected.",
+            "No bounding box selected.",
+            gr.update(minimum=0, maximum=1, value=0),
+            gr.update(minimum=1, maximum=1, value=1)
+        )
+
+    i = int(video_index)
+    path = state["current"][i]
+    info = read_video_info(path)
+    bbox = state["boxes"][i]
+    start_time, end_time = state["trims"][i]
+
     annotation = make_annotation(
-        video_path,
+        path,
         bbox
     )
 
+    video_info = (
+        f"Video {i + 1}/{len(state['current'])}\n"
+        f"Name: {Path(state['originals'][i]).name}\n"
+        f"Working clip: {Path(path).name}\n"
+        f"Resolution: {info['width']} × {info['height']}\n"
+        f"FPS: {info['fps']:.6f}\n"
+        f"Frames: {info['n_frames']}\n"
+        f"Duration: {info['duration']:.2f} s\n"
+        f"Selected range: {start_time:.2f} → {end_time:.2f} s"
+    )
+
     return (
+        path,
         annotation,
-        info_text,
-        format_bbox(bbox),
-        boxes
+        video_info,
+        bbox_text(bbox),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=start_time
+        ),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=end_time
+        )
     )
 
 
-def save_current_bbox(video_index, annotation, boxes):
+def save_bbox(
+    video_index,
+    annotation,
+    state
+):
     if video_index is None:
-        return boxes, "No video selected."
+        return state, "No video selected."
+
+    i = int(video_index)
+    bbox = get_bbox(annotation)
+
+    state["boxes"][i] = bbox
+
+    return state, bbox_text(bbox)
+
+
+def update_mask_preview(
+    video_index,
+    annotation,
+    state
+):
+    if video_index is None or not state["current"]:
+        return None
 
     bbox = get_bbox(annotation)
     if bbox is None:
-        boxes[str(video_index)] = None
-        return boxes, "No bounding box selected."
-
-    boxes[str(video_index)] = bbox
-    return boxes, format_bbox(bbox)
-
-
-def update_preview(video_index, annotation, video_paths):
-    if video_index is None or not video_paths:
         return None
 
-    bbox_info = get_bbox(annotation)
+    path = state["current"][int(video_index)]
 
-    if bbox_info is None:
+    try:
+        return make_preview(
+            path,
+            bbox
+        )
+    except Exception:
         return None
 
-    video_path = video_paths[int(video_index)]
-    info = read_video_info(video_path)
 
-    bbox = convert_bbox_to_video(
-        bbox_info,
-        info["width"],
-        info["height"]
+def apply_cut(
+    video_index,
+    start_time,
+    end_time,
+    state,
+    save_path
+):
+    if video_index is None:
+        raise gr.Error("Select a video first.")
+
+    i = int(video_index)
+    original = state["originals"][i]
+
+    info = read_video_info(original)
+
+    start_time = float(start_time)
+    end_time = float(end_time)
+
+    if start_time < 0:
+        raise gr.Error("Start time cannot be negative.")
+
+    if end_time > info["duration"]:
+        end_time = info["duration"]
+
+    if end_time <= start_time:
+        raise gr.Error(
+            "End time must be greater than start time."
+        )
+
+    session_id = uuid.uuid4().hex[:10]
+    cut_dir = (
+        Path(save_path) /
+        f"session_{session_id}" /
+        "clips"
+    )
+    cut_dir.mkdir(
+        parents=True,
+        exist_ok=True
     )
 
-    preview = info["first_frame"].copy()
-    xmin, ymin, xmax, ymax = bbox
+    name = safe_filename(original)
 
-    overlay = preview.copy()
-    overlay[ymin:ymax, xmin:xmax] = [255, 0, 0]
-
-    preview = cv2.addWeighted(
-        preview,
-        0.55,
-        overlay,
-        0.45,
-        0
+    clipped_path = (
+        cut_dir /
+        f"{name}_{start_time:.2f}_{end_time:.2f}.mp4"
     )
 
-    cv2.rectangle(
-        preview,
-        (xmin, ymin),
-        (xmax - 1, ymax - 1),
-        (255, 255, 0),
-        3
+    try:
+        trim_video(
+            original,
+            start_time,
+            end_time,
+            str(clipped_path)
+        )
+    except Exception as e:
+        raise gr.Error(str(e))
+
+    state["current"][i] = str(clipped_path)
+    state["trims"][i] = (
+        start_time,
+        end_time
     )
 
-    return preview
+    # The first frame changed, so the old box is invalid.
+    state["boxes"][i] = None
+
+    clipped_info = read_video_info(
+        str(clipped_path)
+    )
+
+    annotation = make_annotation(
+        str(clipped_path)
+    )
+
+    video_info = (
+        f"Video {i + 1}/{len(state['current'])}\n"
+        f"Original: {Path(original).name}\n"
+        f"Working clip: {Path(clipped_path).name}\n"
+        f"Resolution: {clipped_info['width']} × "
+        f"{clipped_info['height']}\n"
+        f"FPS: {clipped_info['fps']:.6f}\n"
+        f"Frames: {clipped_info['n_frames']}\n"
+        f"Duration: {clipped_info['duration']:.2f} s\n"
+        f"Selected range: {start_time:.2f} → "
+        f"{end_time:.2f} s"
+    )
+
+    return (
+        state,
+        str(clipped_path),
+        annotation,
+        video_info,
+        bbox_text(None),
+        None,
+        "Cut applied. Draw a new bounding box for this clip."
+    )
 
 
-def run_gui(input_videos, boxes, engine, save_path):
-    if not input_videos:
-        raise gr.Error("Upload at least one video.")
+def reset_cut(
+    video_index,
+    state
+):
+    if video_index is None:
+        raise gr.Error("Select a video first.")
 
-    if not boxes:
-        raise gr.Error("No bounding boxes have been created.")
+    i = int(video_index)
+    original = state["originals"][i]
+    info = read_video_info(original)
 
-    bbox_list = []
+    state["current"][i] = original
+    state["trims"][i] = (
+        0.0,
+        info["duration"]
+    )
+    state["boxes"][i] = None
 
-    for i in range(len(input_videos)):
-        bbox_info = boxes.get(str(i))
+    annotation = make_annotation(original)
 
-        if bbox_info is None:
-            raise gr.Error(
-                f"Please draw a bounding box for video "
-                f"{i + 1}: {Path(input_videos[i]).name}"
+    video_info = (
+        f"Video {i + 1}/{len(state['current'])}\n"
+        f"Name: {Path(original).name}\n"
+        f"Resolution: {info['width']} × {info['height']}\n"
+        f"FPS: {info['fps']:.6f}\n"
+        f"Frames: {info['n_frames']}\n"
+        f"Duration: {info['duration']:.2f} s\n"
+        f"Selected range: 0.00 → {info['duration']:.2f} s"
+    )
+
+    return (
+        state,
+        original,
+        annotation,
+        video_info,
+        bbox_text(None),
+        None,
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=0
+        ),
+        gr.update(
+            minimum=0,
+            maximum=max(info["duration"], 0.01),
+            value=info["duration"]
+        ),
+        "Cut reset. Original video restored."
+    )
+
+
+def run_gui(
+    state,
+    engine,
+    save_path
+):
+    if not state or not state["current"]:
+        raise gr.Error(
+            "Upload at least one video."
+        )
+
+    missing = []
+
+    for i, bbox in enumerate(state["boxes"]):
+        if bbox is None:
+            missing.append(
+                Path(state["originals"][i]).name
             )
 
-        bbox_list.append(bbox_info)
+    if missing:
+        raise gr.Error(
+            "Please draw a bounding box for every video:\n"
+            + "\n".join(missing)
+        )
 
     results = engine.process_batch(
-        input_videos=input_videos,
-        boxes=bbox_list,
+        input_videos=state["current"],
+        boxes=state["boxes"],
         save_path=save_path
     )
 
     successful = [
         r for r in results
         if r.get("output_path")
-        and Path(r["output_path"]).exists()
+        and os.path.exists(r["output_path"])
     ]
 
-    failed = [
-        r for r in results
-        if r.get("error")
-    ]
-
-    result_files = [
+    files = [
         r["output_path"]
         for r in successful
     ]
 
     first_result = (
-        result_files[0]
-        if result_files
+        files[0]
+        if files
         else None
     )
 
     lines = [
-        "Processing complete.",
-        f"Videos: {len(input_videos)}",
+        "PROCESSING COMPLETE",
+        "",
+        f"Videos: {len(state['current'])}",
         f"Successful: {len(successful)}",
-        f"Failed: {len(failed)}",
+        f"Failed: {len(results) - len(successful)}",
         ""
     ]
 
-    for result in results:
+    for r in results:
         name = Path(
-            result["input_video"]
+            r["input_video"]
         ).name
 
-        if result.get("output_path"):
-            lines.append(f"[OK] {name}")
-            lines.append(
-                f"     bbox = {result['bbox']}"
-            )
-            lines.append(
-                f"     mask = {result['input_mask']}"
-            )
-            lines.append(
-                f"     output = {result['output_path']}"
-            )
+        if r.get("output_path"):
+            lines.extend([
+                f"[OK] {name}",
+                f"     bbox: {r['bbox']}",
+                f"     mask: {r['mask_path']}",
+                f"     output: {r['output_path']}",
+                ""
+            ])
         else:
-            lines.append(
-                f"[FAILED] {name}: "
-                f"{result.get('error')}"
-            )
+            lines.extend([
+                f"[FAILED] {name}",
+                f"     {r.get('error', 'Unknown error')}",
+                ""
+            ])
 
     return (
-        result_files,
+        files,
         first_result,
         "\n".join(lines)
     )
 
 
 def build_parser():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--input_video",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Optional initial video list."
+    parser = argparse.ArgumentParser(
+        description="GUI for ProPainter + DiffuEraser video object removal."
     )
 
     parser.add_argument(
@@ -827,22 +1096,22 @@ def build_parser():
     parser.add_argument(
         "--base_model_path",
         type=str,
-        default=f"weights/stable-diffusion-v1-5"
+        default=f"{WEIGHTS}/stable-diffusion-v1-5"
     )
     parser.add_argument(
         "--vae_path",
         type=str,
-        default=f"weights/sd-vae-ft-mse"
+        default=f"{WEIGHTS}/sd-vae-ft-mse"
     )
     parser.add_argument(
         "--diffueraser_path",
         type=str,
-        default=f"weights/diffuEraser"
+        default=f"{WEIGHTS}/diffuEraser"
     )
     parser.add_argument(
         "--propainter_model_dir",
         type=str,
-        default=f"weights/propainter"
+        default=f"{WEIGHTS}/propainter"
     )
 
     parser.add_argument(
@@ -869,27 +1138,56 @@ def build_parser():
 
 
 def build_demo(engine, save_path):
-    title = """
-    <div style="text-align:center;font-size:34px;font-family:Arial,sans-serif;font-weight:bold;">
-        Video Object / Text Remover
-    </div>
-    <div style="text-align:center;font-size:16px;color:#666;margin:10px 0 20px;">
-        Upload multiple videos and draw a separate removal box for each video.
-    </div>
-    """
-
-    instructions = """
-    ### Workflow
-    **1. Upload videos** → **2. Select a video** → **3. Draw its box** → **4. Select the next video** → **5. Draw its box** → **6. Remove Objects**
-
-    Each video has its own bounding box and its own automatically generated mask.
-    """
-
     css = """
-    #main {max-width:1200px;margin:auto;}
-    #remove_btn {width:60%;margin:15px auto;display:block;font-size:20px;}
-    .mono textarea {font-family:monospace !important;}
-    footer {display:none !important;}
+    .gradio-container {
+        max-width: 1350px !important;
+        margin: 0 auto !important;
+        background: #f6f8fb !important;
+    }
+    .hero {
+        text-align: center;
+        padding: 28px 20px 20px 20px;
+        margin-bottom: 18px;
+        border-radius: 18px;
+        background: linear-gradient(135deg,#111827,#263449);
+        color: white;
+        box-shadow: 0 10px 30px rgba(0,0,0,.12);
+    }
+    .hero h1 {
+        margin: 0;
+        font-size: 34px;
+        font-weight: 750;
+    }
+    .hero p {
+        margin: 10px 0 0 0;
+        color: #cbd5e1;
+        font-size: 16px;
+    }
+    .section {
+        border-radius: 16px;
+        padding: 18px;
+        background: white;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 5px 18px rgba(0,0,0,.05);
+        margin-bottom: 16px;
+    }
+    .step {
+        font-size: 18px;
+        font-weight: 700;
+        margin-bottom: 10px;
+    }
+    #remove-btn {
+        min-height: 58px !important;
+        font-size: 19px !important;
+        font-weight: 700 !important;
+        border-radius: 12px !important;
+    }
+    .mono textarea {
+        font-family: monospace !important;
+    }
+    footer {
+        display: none !important;
+    }
     """
 
     with gr.Blocks(
@@ -897,103 +1195,178 @@ def build_demo(engine, save_path):
         theme=gr.themes.Soft(),
         css=css
     ) as demo:
-        video_state = gr.State([])
-        boxes_state = gr.State({})
+        session_state = gr.State({
+            "originals": [],
+            "current": [],
+            "boxes": [],
+            "trims": []
+        })
 
-        gr.HTML(title)
-        gr.Markdown(instructions)
+        gr.HTML("""
+        <div class="hero">
+            <h1>Video Object & Text Remover</h1>
+            <p>Trim your video, mark the object, and remove it with ProPainter + DiffuEraser.</p>
+        </div>
+        """)
 
-        videos = gr.File(
-            label="1. Upload Video(s)",
-            file_count="multiple",
-            file_types=[
-                ".mp4",
-                ".mov",
-                ".avi",
-                ".mkv",
-                ".webm"
-            ],
-            type="filepath"
-        )
+        with gr.Column(elem_classes="section"):
+            gr.Markdown(
+                '<div class="step">1. Select Video Files</div>'
+            )
+            videos = gr.File(
+                label="Upload one or more videos",
+                file_count="multiple",
+                file_types=[
+                    ".mp4",
+                    ".mov",
+                    ".avi",
+                    ".mkv",
+                    ".webm"
+                ],
+                type="filepath"
+            )
+            video_selector = gr.Dropdown(
+                label="Current Video",
+                choices=[],
+                value=None
+            )
 
-        video_selector = gr.Dropdown(
-            label="2. Select Video to Annotate",
-            choices=[],
-            type="value",
-            value=None
-        )
+        with gr.Column(elem_classes="section"):
+            gr.Markdown(
+                '<div class="step">2. Trim the Current Video</div>'
+            )
 
-        video_info = gr.Textbox(
-            label="Video Information",
-            lines=6,
-            interactive=False,
-            elem_classes="mono"
-        )
+            current_video = gr.Video(
+                label="Current Video",
+                interactive=False,
+                height=420
+            )
 
-        annotation = image_annotator(
-            value=None,
-            label="3. Draw Bounding Box",
-            single_box=True,
-            disable_edit_boxes=True,
-            box_min_size=5,
-            box_thickness=3,
-            box_selected_thickness=4,
-            height=600,
-            width=1000,
-            show_clear_button=True,
-            show_remove_button=True
-        )
+            video_info = gr.Textbox(
+                label="Video Information",
+                lines=7,
+                interactive=False,
+                elem_classes="mono"
+            )
 
-        bbox_text = gr.Textbox(
-            label="Current Bounding Box",
-            lines=6,
-            interactive=False,
-            elem_classes="mono"
-        )
+            with gr.Row():
+                start_slider = gr.Slider(
+                    minimum=0,
+                    maximum=1,
+                    value=0,
+                    step=0.01,
+                    label="Start Time (seconds)"
+                )
+                end_slider = gr.Slider(
+                    minimum=1,
+                    maximum=1,
+                    value=1,
+                    step=0.01,
+                    label="End Time (seconds)"
+                )
 
-        mask_preview = gr.Image(
-            label="Mask Preview — Red Area Will Be Removed",
-            interactive=False,
-            height=450
-        )
+            with gr.Row():
+                cut_button = gr.Button(
+                    "✂ Apply Cut",
+                    variant="primary"
+                )
+                reset_cut_button = gr.Button(
+                    "↩ Reset Cut"
+                )
 
-        gr.Markdown(
-            "Draw a box for **every video** before clicking Remove Objects."
-        )
+            trim_status = gr.Textbox(
+                label="Trim Status",
+                interactive=False
+            )
 
-        remove_btn = gr.Button(
-            "Remove Objects",
-            variant="primary",
-            size="lg",
-            elem_id="remove_btn"
-        )
+        with gr.Column(elem_classes="section"):
+            gr.Markdown(
+                '<div class="step">3. Mark the Object / Text to Remove</div>'
+            )
 
-        status = gr.Textbox(
-            label="Processing Status",
-            lines=15,
-            interactive=False,
-            elem_classes="mono"
-        )
+            gr.Markdown(
+                "Draw **one box** around the object or text. "
+                "Every video has its own independent box."
+            )
 
-        result_video = gr.Video(
-            label="First Result"
-        )
+            annotation = image_annotator(
+                value=None,
+                label="First Frame of Current Video",
+                single_box=True,
+                disable_edit_boxes=True,
+                box_min_size=5,
+                box_thickness=3,
+                box_selected_thickness=4,
+                height=600,
+                width=1000,
+                show_clear_button=True,
+                show_remove_button=True
+            )
 
-        result_files = gr.Files(
-            label="All Results"
-        )
+            bbox_coordinates = gr.Textbox(
+                label="Bounding Box",
+                lines=6,
+                interactive=False,
+                elem_classes="mono"
+            )
+
+            mask_preview = gr.Image(
+                label="Mask Preview — Red Area Will Be Removed",
+                interactive=False,
+                height=420
+            )
+
+        with gr.Column(elem_classes="section"):
+            gr.Markdown(
+                '<div class="step">4. Run Video Removal</div>'
+            )
+
+            gr.Markdown(
+                "Make sure every uploaded video has a bounding box "
+                "before starting inference."
+            )
+
+            remove_button = gr.Button(
+                "🚀 Remove Objects",
+                variant="primary",
+                elem_id="remove-btn"
+            )
+
+            status = gr.Textbox(
+                label="Processing Status",
+                lines=16,
+                interactive=False,
+                elem_classes="mono"
+            )
+
+        with gr.Column(elem_classes="section"):
+            gr.Markdown(
+                '<div class="step">5. Results</div>'
+            )
+
+            result_video = gr.Video(
+                label="First Result",
+                height=420
+            )
+
+            result_files = gr.Files(
+                label="All Result Videos"
+            )
 
         videos.change(
-            fn=update_video_list,
+            fn=upload_videos,
             inputs=videos,
             outputs=[
-                video_state,
+                session_state,
                 video_selector,
-                video_selector,
+                current_video,
+                annotation,
                 video_info,
-                bbox_text,
-                boxes_state,
-                annotation
+                bbox_coordinates,
+                start_slider,
+                end_slider,
+                trim_status,
+                bbox_coordinates
             ]
         )
 
@@ -1001,51 +1374,92 @@ def build_demo(engine, save_path):
             fn=select_video,
             inputs=[
                 video_selector,
-                video_state,
-                boxes_state
+                session_state
             ],
             outputs=[
+                current_video,
                 annotation,
                 video_info,
-                bbox_text,
-                boxes_state
+                bbox_coordinates,
+                start_slider,
+                end_slider
             ]
         )
 
         annotation.change(
-            fn=save_current_bbox,
+            fn=save_bbox,
             inputs=[
                 video_selector,
                 annotation,
-                boxes_state
+                session_state
             ],
             outputs=[
-                boxes_state,
-                bbox_text
+                session_state,
+                bbox_coordinates
             ]
         )
 
         annotation.change(
-            fn=update_preview,
+            fn=update_mask_preview,
             inputs=[
                 video_selector,
                 annotation,
-                video_state
+                session_state
             ],
             outputs=mask_preview
         )
 
-        remove_btn.click(
-            fn=lambda input_videos, boxes: run_gui(
-                input_videos,
-                boxes,
-                engine,
+        cut_button.click(
+            fn=lambda idx, start, end, state: apply_cut(
+                idx,
+                start,
+                end,
+                state,
                 save_path
             ),
             inputs=[
-                video_state,
-                boxes_state
+                video_selector,
+                start_slider,
+                end_slider,
+                session_state
             ],
+            outputs=[
+                session_state,
+                current_video,
+                annotation,
+                video_info,
+                bbox_coordinates,
+                mask_preview,
+                trim_status
+            ]
+        )
+
+        reset_cut_button.click(
+            fn=reset_cut,
+            inputs=[
+                video_selector,
+                session_state
+            ],
+            outputs=[
+                session_state,
+                current_video,
+                annotation,
+                video_info,
+                bbox_coordinates,
+                mask_preview,
+                start_slider,
+                end_slider,
+                trim_status
+            ]
+        )
+
+        remove_button.click(
+            fn=lambda state: run_gui(
+                state,
+                engine,
+                save_path
+            ),
+            inputs=session_state,
             outputs=[
                 result_files,
                 result_video,
@@ -1060,10 +1474,12 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    os.makedirs(
-        args.save_path,
+    Path(args.save_path).mkdir(
+        parents=True,
         exist_ok=True
     )
+
+    require_ffmpeg()
 
     engine = VideoRemovalEngine(args)
 
@@ -1074,21 +1490,11 @@ def main():
 
     demo.queue()
 
-    initial_files = args.input_video
-
-    if initial_files:
-        # These files are only used as the initial GUI video list.
-        # The masks still MUST be created through the GUI.
-        initial_files = [
-            str(Path(x).resolve())
-            for x in initial_files
-        ]
-
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
         share=args.share,
-        show_error=True,
+        show_error=True
     )
 
 

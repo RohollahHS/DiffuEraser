@@ -38,11 +38,11 @@ cd $PROJECTS_DIR/diffueraser
 
 ##### Run the code
 
-input_path=/scratch/rohhs/downloads/yt-dlp/biker.mp4
-output_dir=/scratch/rohhs/downloads/yt-dlp/enhanced
-
 export HF_HUB_OFFLINE=1
 
 python run_diffueraser.py 
 
-python app.py --input_video examples/example3/video.mp4
+input_video=examples/example3/video.mp4
+save_path=/scratch/rohhs/downloads/diffueraser
+
+python app.py --input_video $input_video --svae_path $save_path --max_img_size 1920
