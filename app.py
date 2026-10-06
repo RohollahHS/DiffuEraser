@@ -517,7 +517,13 @@ def build_demo(args):
     def run_gui_event(state, models_loaded, progress=gr.Progress(track_tqdm=False)):
         return run_gui(state, models_loaded, save_path, progress)
     initial_state = empty_state()
-    with gr.Blocks(title="Video Object Remover") as demo:
+    block_kwargs = {}
+    if "theme" in __import__("inspect").signature(gr.Blocks).parameters:
+        block_kwargs["theme"] = gr.themes.Soft()
+    if "css" in __import__("inspect").signature(gr.Blocks).parameters:
+        block_kwargs["css"] = GUI_CSS
+    block_kwargs["title"] = "Video Object Remover"
+    with gr.Blocks(**block_kwargs) as demo:
         session_state = gr.State(initial_state, time_to_live=86400)
         models_loaded = gr.State(False)
         gr.HTML('<div class="hero"><h1>Video Object & Text Remover</h1><p>Upload, trim, click two corners of the object, then run ProPainter + DiffuEraser.</p></div>')
@@ -540,7 +546,7 @@ def build_demo(args):
         with gr.Column(elem_classes="section"):
             gr.Markdown('<div class="step">3. Mark Object / Text</div>')
             gr.Markdown("Click the **top-left** corner of the box, then click the **bottom-right** corner. Click again to replace the box. You can also edit the coordinates manually.")
-            frame_image = gr.Image(label="First Frame — click two corners", type="numpy", interactive=True, sources=[], height=600, width=1000)
+            frame_image = gr.Image(label="First Frame — click two corners", type="numpy", interactive=True, height=600, width=1000)
             bbox_coordinates = gr.Textbox(label="Bounding Box", lines=6, interactive=False, elem_classes="mono")
             with gr.Row():
                 xmin = gr.Number(label="xmin", precision=0)
@@ -582,9 +588,22 @@ def main():
     args = build_parser().parse_args()
     Path(args.save_path).mkdir(parents=True, exist_ok=True)
     require_tools()
+    print(f"Gradio version: {gr.__version__}")
     print("Gradio app starting. Models are NOT loaded at startup.")
     demo = build_demo(args)
-    demo.queue(max_size=16, default_concurrency_limit=8).launch(server_name=args.server_name, server_port=args.server_port, share=args.share, show_error=True, theme=gr.themes.Soft(), css=GUI_CSS)
+    launch_kwargs = {
+        "server_name": args.server_name,
+        "server_port": args.server_port,
+        "share": args.share,
+        "show_error": True
+    }
+    import inspect
+    launch_params = inspect.signature(demo.launch).parameters
+    if "theme" in launch_params:
+        launch_kwargs["theme"] = gr.themes.Soft()
+    if "css" in launch_params:
+        launch_kwargs["css"] = GUI_CSS
+    demo.queue(max_size=16, default_concurrency_limit=8).launch(**launch_kwargs)
 
 
 if __name__ == "__main__":
