@@ -21,7 +21,6 @@ srun $SRUN_ARGS mkdir -p ${FLASHINFER_WORKSPACE_BASE}
 # kill -9 $(pgrep -f "proxy --hostname 0.0.0.0 --port 8899")
 # proxy --hostname 0.0.0.0 --port 8899 &
 
-kill -9 $(lsof -t -i:8899)
 export http_proxy=http://${node1}:8899
 export https_proxy=$http_proxy
 export HTTP_PROXY=$http_proxy
@@ -33,9 +32,9 @@ export NO_PROXY=localhost,127.0.0.1
 module --force purge all
 module load StdEnv/2023  nvhpc/23.9  openmpi/4.1.5
 module load cuda/12.2
-source /scratch/rohhs/venvs/diffuEraser/bin/activate
+source /scratch/rohhs/venvs/diffueraser/bin/activate
 
-cd $PROJECTS_DIR/diffuEraser
+cd $PROJECTS_DIR/diffueraser
 
 ##### Run the code
 
