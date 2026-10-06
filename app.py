@@ -1560,11 +1560,6 @@ def build_parser():
         default=8000
     )
 
-    parser.add_argument(
-        "--share",
-        action="store_true"
-    )
-
     return parser
 
 
@@ -2102,7 +2097,7 @@ def main():
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
-        share=args.share,
+        share=share,
         show_error=True,
         allowed_paths=[
             str(save_path),
