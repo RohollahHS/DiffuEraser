@@ -40,7 +40,7 @@ cd $PROJECTS_DIR/diffueraser
 
 export HF_HUB_OFFLINE=1
 
-python run_diffueraser.py 
+# python run_diffueraser.py
 
 input_video=examples/example3/video.mp4
 save_path=/scratch/rohhs/downloads/diffueraser
