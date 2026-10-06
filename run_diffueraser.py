@@ -5,8 +5,6 @@ import argparse
 from diffueraser.diffueraser import DiffuEraser
 from propainter.inference import Propainter, get_device
 
-WEIGHTS = os.getenv("HF_HUB", "weights")
-
 def main():
 
     ## input params
@@ -16,14 +14,14 @@ def main():
     parser.add_argument('--video_length', type=int, default=10, help='The maximum length of output video')
     parser.add_argument('--mask_dilation_iter', type=int, default=8, help='Adjust it to change the degree of mask expansion')
     parser.add_argument('--max_img_size', type=int, default=960, help='The maximum length of output width and height')
-    parser.add_argument('--save_path', type=str, default="/scratch/rohhs/downloads/diffuEraser" , help='Path to the output')
+    parser.add_argument('--save_path', type=str, default="/scratch/rohhs/downloads/diffueraser" , help='Path to the output')
     parser.add_argument('--ref_stride', type=int, default=10, help='Propainter params')
     parser.add_argument('--neighbor_length', type=int, default=10, help='Propainter params')
     parser.add_argument('--subvideo_length', type=int, default=50, help='Propainter params')
-    parser.add_argument('--base_model_path', type=str, default=f"{WEIGHTS}/stable-diffusion-v1-5" , help='Path to sd1.5 base model')
-    parser.add_argument('--vae_path', type=str, default=f"{WEIGHTS}/sd-vae-ft-mse" , help='Path to vae')
-    parser.add_argument('--diffueraser_path', type=str, default=f"{WEIGHTS}/diffuEraser" , help='Path to DiffuEraser')
-    parser.add_argument('--propainter_model_dir', type=str, default=f"{WEIGHTS}/propainter" , help='Path to priori model')
+    parser.add_argument('--base_model_path', type=str, default="weights/stable-diffusion-v1-5" , help='Path to sd1.5 base model')
+    parser.add_argument('--vae_path', type=str, default="weights/sd-vae-ft-mse" , help='Path to vae')
+    parser.add_argument('--diffueraser_path', type=str, default="weights/diffuEraser" , help='Path to DiffuEraser')
+    parser.add_argument('--propainter_model_dir', type=str, default="weights/propainter" , help='Path to priori model')
     args = parser.parse_args()
                   
     if not os.path.exists(args.save_path):
