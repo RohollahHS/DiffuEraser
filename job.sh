@@ -44,5 +44,4 @@ output_dir=/scratch/rohhs/downloads/yt-dlp/enhanced
 
 export HF_HUB_OFFLINE=1
 
-cd gradio_demo
-python3 test.py
+python run_diffueraser.py 
