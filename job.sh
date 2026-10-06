@@ -44,3 +44,5 @@ output_dir=/scratch/rohhs/downloads/yt-dlp/enhanced
 export HF_HUB_OFFLINE=1
 
 python run_diffueraser.py 
+
+python app.py --input_video examples/example3/video.mp4
