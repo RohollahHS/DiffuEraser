@@ -1,0 +1,6 @@
+ffmpeg -ss 00:00:00 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_00_10.mp4"
+ffmpeg -ss 00:00:10 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_10_20.mp4"
+ffmpeg -ss 00:00:20 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_20_30.mp4"
+ffmpeg -ss 00:00:30 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_30_40.mp4"
+ffmpeg -ss 00:00:40 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_40_50.mp4"
+ffmpeg -ss 00:00:50 -t 10 -i "deputy_saves_dog_from_car_on_fire_60.mp4" -c copy "deputy_saves_dog_from_car_on_fire_50_60.mp4"
