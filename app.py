@@ -1895,7 +1895,7 @@ def main():
     demo = build_demo(
         engine=engine,
         save_path=str(save_path),
-        browse_path=str(browse_path)
+        browse_path=str(browse_path),
         args=args,
     )
 
