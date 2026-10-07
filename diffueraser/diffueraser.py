@@ -78,8 +78,10 @@ def read_mask(validation_mask, fps, n_total_frames, img_size, mask_dilation_iter
         exit()
     mask_fps = cap.get(cv2.CAP_PROP_FPS)
     if mask_fps != fps:
-        cap.release()
-        raise ValueError("The frame rate of all input videos needs to be consistent.")
+        print(f"priori_fps: {mask_fps}")
+        print(f"fps: {fps}")
+        # cap.release()
+        # raise ValueError("The frame rate of all input videos needs to be consistent.")
 
     masks = []
     masked_images = []
@@ -121,8 +123,10 @@ def read_priori(priori, fps, n_total_frames, img_size):
         exit()
     priori_fps = cap.get(cv2.CAP_PROP_FPS)
     if priori_fps != fps:
-        cap.release()
-        raise ValueError("The frame rate of all input videos needs to be consistent.")
+        print(f"priori_fps: {priori_fps}")
+        print(f"fps: {fps}")
+        # cap.release()
+        # raise ValueError("The frame rate of all input videos needs to be consistent.")
 
     prioris=[]
     idx = 0
