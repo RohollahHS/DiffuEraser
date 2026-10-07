@@ -42,7 +42,10 @@ export HF_HUB_OFFLINE=1
 
 # python run_diffueraser.py
 
-input_video=examples/example3/video.mp4
-save_path=/scratch/rohhs/downloads/diffueraser
+input_video=/scratch/rohhs/downloads/yt-dlp/trust_scale2.0_seed0.mp4
+input_mask=/scratch/rohhs/downloads/yt-dlp/1007-mask.mp4
+save_path=/scratch/rohhs/downloads/yt-dlp/
 
-python app.py --save_path $save_path
+# python app.py --save_path $save_path
+
+python run_inference.py --input_video $input_video --input_mask $input_mask --save_path $save_path
