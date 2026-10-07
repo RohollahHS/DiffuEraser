@@ -163,6 +163,8 @@ def read_video(validation_image, video_length, nframes, max_img_size):
         raise ValueError("The resolution of the uploaded video must be larger than 256x256.")
     if(max_size>4096):
         raise ValueError("The resolution of the uploaded video must be smaller than 4096x4096.")
+    if max_img_size is None:
+        img_size = frames[0].size
     if max_size>max_img_size:
         ratio = max_size/max_img_size
         ratio_size = (int(frames[0].size[0]/ratio),int(frames[0].size[1]/ratio))
@@ -255,8 +257,8 @@ class DiffuEraser:
         validation_prompt = ""  # 
         guidance_scale_final = self.guidance_scale if guidance_scale==None else guidance_scale
 
-        if (max_img_size<256 or max_img_size>1920):
-            raise ValueError("The max_img_size must be larger than 256, smaller than 1920.")
+        # if (max_img_size<256 or max_img_size>1920):
+        #     raise ValueError("The max_img_size must be larger than 256, smaller than 1920.")
 
         ################ read input video ################ 
         frames, fps, img_size, n_clip, n_total_frames = read_video(validation_image, video_length, nframes, max_img_size)
