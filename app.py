@@ -345,7 +345,8 @@ class VideoRemovalEngine:
             raise ValueError("No videos were uploaded.")
         if len(boxes) != len(input_videos):
             raise ValueError("The number of bounding boxes must equal the number of videos.")
-        session_dir = Path(save_path) / f"session_{uuid.uuid4().hex[:10]}"
+        # session_dir = Path(save_path) / f"session_{uuid.uuid4().hex[:10]}"
+        session_dir = Path(save_path)
         session_dir.mkdir(parents=True, exist_ok=True)
         results = []
         total_start = time.time()
@@ -358,7 +359,7 @@ class VideoRemovalEngine:
                 info = read_video_info(input_video)
                 bbox = clamp_bbox(bbox, info["width"], info["height"])
                 video_name = safe_filename(input_video)
-                output_dir = session_dir / video_name
+                output_dir = session_dir / video_name + "_processed"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 mask_path = output_dir / f"{video_name}_bbox_mask.avi"
                 create_mask_video(input_video, bbox, str(mask_path))
@@ -965,7 +966,7 @@ def main():
     demo.launch(
         server_name=args.server_name,
         server_port=args.server_port,
-        share=args.share,
+        share=True,
         show_error=True,
         allowed_paths=[str(save_path), str(browse_path)]
     )
