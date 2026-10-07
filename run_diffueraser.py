@@ -23,12 +23,14 @@ def main():
     parser.add_argument('--diffueraser_path', type=str, default="weights/diffuEraser" , help='Path to DiffuEraser')
     parser.add_argument('--propainter_model_dir', type=str, default="weights/propainter" , help='Path to priori model')
     args = parser.parse_args()
-                  
+    
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
-    priori_path = os.path.join(args.save_path, "priori.mp4")                        
-    output_path = os.path.join(args.save_path, "diffueraser_result.mp4") 
     
+    video_name = os.path.splitext(os.path.basename(args.input_video))[0]
+    priori_path = os.path.join(args.save_path, video_name + "_priori.mp4")
+    output_path = os.path.join(args.save_path, video_name + "_diffueraser.mp4")
+
     ## model initialization
     device = get_device()
     # PCM params

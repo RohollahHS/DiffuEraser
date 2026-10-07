@@ -17,8 +17,12 @@ srun $SRUN_ARGS mkdir -p ${VLLM_CONFIG_ROOT}
 srun $SRUN_ARGS mkdir -p ${VLLM_ASSETS_CACHE}
 srun $SRUN_ARGS mkdir -p ${FLASHINFER_WORKSPACE_BASE}
 
-ssh $node1 &
-proxy --hostname 0.0.0.0 --port 8899 >/dev/null 2>&1 &
+# Host where the job was submitted (usually the login node)
+LOGIN_HOST="${SLURM_SUBMIT_HOST}"
+ssh "$LOGIN_HOST" "
+    nohup ssh '$node1' </dev/null >/dev/null 2>&1 &
+    nohup proxy --hostname 0.0.0.0 --port 8899 </dev/null >/dev/null 2>&1 &
+" </dev/null >/dev/null 2>&1
 
 export http_proxy=http://${node1}:8899
 export https_proxy=$http_proxy
