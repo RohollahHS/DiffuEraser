@@ -93,7 +93,7 @@ def read_mask(validation_mask, fps, n_total_frames, img_size, mask_dilation_iter
         if(idx >= n_total_frames):
             break
         mask = Image.fromarray(frame[...,::-1]).convert('L')
-        if mask.size != img_size:
+        if img_size is not None and mask.size != img_size:
             mask = mask.resize(img_size, Image.NEAREST)
         mask = np.asarray(mask)
         m = np.array(mask > 0).astype(np.uint8)
@@ -137,7 +137,7 @@ def read_priori(priori, fps, n_total_frames, img_size):
         if(idx >= n_total_frames):
             break
         img = Image.fromarray(frame[...,::-1])
-        if img.size != img_size:
+        if img_size is not None and img.size != img_size:
             img = img.resize(img_size)
         prioris.append(img)
         idx += 1
@@ -164,8 +164,9 @@ def read_video(validation_image, video_length, nframes, max_img_size):
     if(max_size>4096):
         raise ValueError("The resolution of the uploaded video must be smaller than 4096x4096.")
     if max_img_size is None:
-        img_size = frames[0].size
-    if max_size>max_img_size:
+        img_size = None
+        return frames, fps, img_size, n_clip, n_total_frames
+    elif max_size>max_img_size:
         ratio = max_size/max_img_size
         ratio_size = (int(frames[0].size[0]/ratio),int(frames[0].size[1]/ratio))
         img_size = (ratio_size[0]-ratio_size[0]%8, ratio_size[1]-ratio_size[1]%8)

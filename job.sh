@@ -48,4 +48,4 @@ save_path=/scratch/rohhs/downloads/yt-dlp/
 
 # python app.py --save_path $save_path
 
-python run_inference.py --input_video $input_video --input_mask $input_mask --save_path $save_path
+python run_diffueraser.py --input_video $input_video --input_mask $input_mask --save_path $save_path
