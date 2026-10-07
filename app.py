@@ -1379,7 +1379,7 @@ def build_parser():
     parser.add_argument(
         "--video_length",
         type=int,
-        default=10
+        default=None
     )
 
     parser.add_argument(

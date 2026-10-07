@@ -150,7 +150,10 @@ def read_priori(priori, fps, n_total_frames, img_size):
 def read_video(validation_image, video_length, nframes, max_img_size):
     vframes, aframes, info = torchvision.io.read_video(filename=validation_image, pts_unit='sec', end_pts=video_length) # RGB
     fps = info['video_fps']
-    n_total_frames = int(video_length * fps)
+    if video_length is None:
+        n_total_frames = vframes.shape[0]
+    else:
+        n_total_frames = int(video_length * fps)
     n_clip = int(np.ceil(n_total_frames/nframes))
 
     frames = list(vframes.numpy())[:n_total_frames]
