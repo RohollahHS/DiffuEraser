@@ -1443,6 +1443,12 @@ def build_parser():
     )
 
     parser.add_argument(
+        "--input_video",
+        type=str,
+        default=None
+    )
+
+    parser.add_argument(
         "--save_path",
         type=str,
         default="./outputs"
@@ -1477,7 +1483,8 @@ def build_parser():
 def build_demo(
     engine,
     save_path,
-    browse_path
+    browse_path,
+    args,
 ):
     css = """
 .gradio-container{max-width:1350px!important;margin:0 auto!important;background:#f6f8fb!important}
@@ -1534,9 +1541,13 @@ footer{display:none!important}
                 type="filepath"
             )
 
+            choices = []
+            if args.input_video is not None:
+                choices = [args.input_video]
+
             video_selector = gr.Dropdown(
                 label="Uploaded Video",
-                choices=[],
+                choices=choices,
                 value=None,
                 interactive=True
             )
@@ -1885,6 +1896,7 @@ def main():
         engine=engine,
         save_path=str(save_path),
         browse_path=str(browse_path)
+        args=args,
     )
 
     demo.queue()
