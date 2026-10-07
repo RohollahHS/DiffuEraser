@@ -45,4 +45,4 @@ export HF_HUB_OFFLINE=1
 input_video=examples/example3/video.mp4
 save_path=/scratch/rohhs/downloads/diffueraser
 
-python app.py --save_path $save_path --max_img_size 1920
+python app.py --save_path $save_path
