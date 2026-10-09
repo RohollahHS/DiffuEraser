@@ -41,8 +41,8 @@ export HF_HUB_OFFLINE=1
 
 # python run_diffueraser.py
 
-input_video="/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-1.mp4 /scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-2.mp4"
-input_mask="/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-3.mp4 /scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-4.mp4"
+input_video=/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-1.mp4
+input_mask=/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-3.mp4
 save_path=/scratch/rohhs/downloads/yt-dlp/
 
 # python app.py --save_path $save_path
