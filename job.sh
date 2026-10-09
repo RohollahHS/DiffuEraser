@@ -37,7 +37,7 @@ cd $PROJECTS_DIR/DiffuEraser
 
 ##### Run the code
 
-export HF_HUB_OFFLINE=1
+# export HF_HUB_OFFLINE=1
 
 # python run_diffueraser.py
 

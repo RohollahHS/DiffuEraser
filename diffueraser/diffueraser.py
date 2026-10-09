@@ -143,7 +143,7 @@ def read_priori(priori, fps, n_total_frames, img_size):
         idx += 1
     cap.release()
 
-    os.remove(priori) # remove priori 
+    # os.remove(priori) # remove priori 
 
     return prioris
 
