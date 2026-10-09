@@ -1,10 +1,11 @@
 import torch
 import os 
+import gc
 import time
+
 import argparse
 from diffueraser.diffueraser import DiffuEraser
 from propainter.inference import Propainter, get_device
-import gc
 
 def main():
 
