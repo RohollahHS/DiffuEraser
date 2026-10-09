@@ -4,6 +4,7 @@ import time
 import argparse
 from diffueraser.diffueraser import DiffuEraser
 from propainter.inference import Propainter, get_device
+import gc
 
 def main():
 
@@ -45,6 +46,11 @@ def main():
                         ref_stride=args.ref_stride, neighbor_length=args.neighbor_length, subvideo_length = args.subvideo_length,
                         mask_dilation = args.mask_dilation_iter) 
 
+    del propainter
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()   # optional, clears IPC-shared handles
+        
     ## diffueraser
     guidance_scale = None    # The default value is 0.  
     video_inpainting_sd.forward(args.input_video, args.input_mask, priori_path, output_path,

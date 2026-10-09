@@ -41,8 +41,8 @@ export HF_HUB_OFFLINE=1
 
 # python run_diffueraser.py
 
-input_video=/scratch/rohhs/downloads/yt-dlp/1007-source.mp4
-input_mask=/scratch/rohhs/downloads/yt-dlp/1007-mask.mp4
+input_video=/scratch/rohhs/downloads/yt-dlp/1009-corrupt-1.mp4
+input_mask=/scratch/rohhs/downloads/yt-dlp/1009-mask-1.mp4
 save_path=/scratch/rohhs/downloads/yt-dlp/
 
 # python app.py --save_path $save_path

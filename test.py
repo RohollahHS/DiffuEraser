@@ -1,39 +1,96 @@
-import torch
-from transformers import Sam3VideoModel, Sam3VideoProcessor, Sam3VideoConfig
+import os
+import json
+import cv2
+import numpy as np
 
-# config = Sam3VideoConfig.from_pretrained("weights/sam3")
-# config.image_size = 560
-# model = Sam3VideoModel.from_pretrained("weights/sam3", config=config, device_map="auto")
+from sam3.model_builder import build_sam3_video_predictor
 
-model = Sam3VideoModel.from_pretrained("weights/sam3", device_map="auto")
-processor = Sam3VideoProcessor.from_pretrained("weights/sam3")
+DEVICE = "cuda"
 
-# Load video frames
-from transformers.video_utils import load_video
-video_url = "https://huggingface.co/datasets/hf-internal-testing/sam2-fixtures/resolve/main/bedroom.mp4"
-video_frames, _ = load_video(video_url)
-num_frames = len(video_frames)
+VIDEO_PATH = "/scratch/rohhs/downloads/yt-dlp/deputy_saves_dog_from_car_on_fire_60.mp4"
+OUTPUT_JSON = "text_boxes.json"
 
-# Initialize video inference session
-inference_session = processor.init_video_session(video=video_frames, inference_device="cuda", processing_device="cpu", video_storage_device="cpu")
+CHECKPOINT_PATH = "/scratch/rohhs/huggingface/hub/sam3/sam3.pt"
+BPE_PATH = None
 
-# Add text prompt to detect and track objects
-text = "person"
-inference_session = processor.add_text_prompt(inference_session=inference_session, text=text)
+TEXT_PROMPT = "text"
+OUTPUT_PROB_THRESHOLD = 0.25
 
-# Process all frames in the video
-outputs_per_frame = {}
-# Pass show_progress_bar=True to display a tqdm progress bar.
-for model_outputs in model.propagate_in_video_iterator(inference_session=inference_session, max_frame_num_to_track=num_frames):
-    processed_outputs = processor.postprocess_outputs(inference_session, model_outputs)
-    outputs_per_frame[model_outputs.frame_idx] = processed_outputs
 
-print(f"Processed {len(outputs_per_frame)} frames")
+print(f"Using device: {DEVICE}")
+print("Loading SAM3...")
 
-# Access results for a specific frame
-frame_0_outputs = outputs_per_frame[0]
-print(f"Detected {len(frame_0_outputs['object_ids'])} objects")
-print(f"Object IDs: {frame_0_outputs['object_ids'].tolist()}")
-print(f"Scores: {frame_0_outputs['scores'].tolist()}")
-print(f"Boxes shape (XYXY format, absolute coordinates): {frame_0_outputs['boxes'].shape}")
-print(f"Masks shape: {frame_0_outputs['masks'].shape}")
+predictor = build_sam3_video_predictor(checkpoint_path=CHECKPOINT_PATH)
+
+print("Starting video session...")
+
+response = predictor.handle_request({"type": "start_session", "resource_path": VIDEO_PATH})
+session_id = response["session_id"]
+
+session = predictor._get_session(session_id)
+inference_state = session["state"]
+
+video_width = int(inference_state["orig_width"])
+video_height = int(inference_state["orig_height"])
+num_frames = int(inference_state["num_frames"])
+
+print(f"Video resolution: {video_width}x{video_height}")
+print(f"Number of frames: {num_frames}")
+
+cap = cv2.VideoCapture(VIDEO_PATH)
+fps = cap.get(cv2.CAP_PROP_FPS)
+cap.release()
+
+if fps <= 0: raise RuntimeError("Could not determine video FPS.")
+
+input_dir = os.path.dirname(VIDEO_PATH)
+input_name = os.path.splitext(os.path.basename(VIDEO_PATH))[0]
+MASK_VIDEO_PATH = os.path.join(input_dir, f"{input_name}_mask.mp4")
+
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+mask_writer = cv2.VideoWriter(MASK_VIDEO_PATH, fourcc, fps, (video_width, video_height), False)
+
+if not mask_writer.isOpened(): raise RuntimeError(f"Could not open mask video for writing: {MASK_VIDEO_PATH}")
+
+predictor.handle_request({"type": "add_prompt", "session_id": session_id, "frame_index": 0, "text": TEXT_PROMPT, "output_prob_thresh": OUTPUT_PROB_THRESHOLD})
+
+all_frames = []
+
+for response in predictor.handle_stream_request({"type": "propagate_in_video", "session_id": session_id, "propagation_direction": "forward", "start_frame_index": 0, "max_frame_num_to_track": None, "output_prob_thresh": OUTPUT_PROB_THRESHOLD}):
+    frame_index = int(response["frame_index"])
+    outputs = response["outputs"]
+    boxes = outputs["out_boxes_xywh"]
+    scores = outputs["out_probs"]
+    object_ids = outputs["out_obj_ids"]
+    frame_mask = np.zeros((video_height, video_width), dtype=np.uint8)
+    frame_boxes = []
+    for object_id, box, score in zip(object_ids, boxes, scores):
+        x, y, w, h = map(float, box)
+        x *= video_width
+        y *= video_height
+        w *= video_width
+        h *= video_height
+        x1 = max(0, min(video_width, int(round(x))))
+        y1 = max(0, min(video_height, int(round(y))))
+        x2 = max(0, min(video_width, int(round(x + w))))
+        y2 = max(0, min(video_height, int(round(y + h))))
+        if x2 <= x1 or y2 <= y1: continue
+        frame_mask[y1:y2, x1:x2] = 255
+        frame_boxes.append({"object_id": int(object_id), "bbox_xyxy": [x1, y1, x2, y2], "bbox_xywh": [x1, y1, x2 - x1, y2 - y1], "score": float(score)})
+    mask_writer.write(frame_mask)
+    all_frames.append({"frame_index": frame_index, "boxes": frame_boxes})
+    print(f"\rProcessing frame {frame_index + 1}/{num_frames}", end="")
+
+mask_writer.release()
+
+print("\nFinished propagation.")
+
+predictor.handle_request({"type": "close_session", "session_id": session_id})
+
+output = { "video": VIDEO_PATH, "mask_video": MASK_VIDEO_PATH, "prompt": TEXT_PROMPT, "width": video_width, "height": video_height, "fps": fps, "frames": all_frames, }
+
+with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
+    json.dump(output, f, indent=2)
+
+print(f"Bounding boxes saved to: {OUTPUT_JSON}")
+print(f"Binary mask video saved to: {MASK_VIDEO_PATH}")

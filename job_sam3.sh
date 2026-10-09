@@ -31,22 +31,33 @@ export HTTPS_PROXY=$http_proxy
 export no_proxy=localhost,127.0.0.1
 export NO_PROXY=localhost,127.0.0.1
 
+##### Project Directory
+
+cd $PROJECTS_DIR/diffueraser
+
+##### SAM 3 Env Setup
+
+module --force purge all
+module load StdEnv/2023  intel/2025.2.0  openmpi/5.0.8
+module load cuda/12.9
+source /scratch/rohhs/venvs/sam3/bin/activate
+
+##### SAM 3
+
+
+
+
 ##### Env Setup
+
 module --force purge all
 module load StdEnv/2023  nvhpc/23.9  openmpi/4.1.5
 module load cuda/12.2
 source /scratch/rohhs/venvs/diffueraser/bin/activate
 
-cd $PROJECTS_DIR/diffueraser
-
 ##### Run the code
 
-export HF_HUB_OFFLINE=1
-
-# python run_diffueraser.py
-
-input_video=/scratch/rohhs/downloads/yt-dlp/1007-source.mp4
-input_mask=/scratch/rohhs/downloads/yt-dlp/1007-mask.mp4
+input_video=/scratch/rohhs/downloads/yt-dlp/1009-corrupt-1.mp4
+input_mask=/scratch/rohhs/downloads/yt-dlp/1009-mask-1.mp4
 save_path=/scratch/rohhs/downloads/yt-dlp/
 
 # python app.py --save_path $save_path
