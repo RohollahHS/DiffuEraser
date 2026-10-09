@@ -33,7 +33,7 @@ module load StdEnv/2023  nvhpc/23.9  openmpi/4.1.5
 module load cuda/12.2
 source /scratch/rohhs/venvs/diffueraser/bin/activate
 
-cd $PROJECTS_DIR/diffueraser
+cd $PROJECTS_DIR/DiffuEraser
 
 ##### Run the code
 
@@ -41,8 +41,8 @@ export HF_HUB_OFFLINE=1
 
 # python run_diffueraser.py
 
-input_video=/scratch/rohhs/downloads/yt-dlp/1009-corrupt-1.mp4
-input_mask=/scratch/rohhs/downloads/yt-dlp/1009-mask-1.mp4
+input_video="/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-1.mp4 /scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-2.mp4"
+input_mask="/scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-3.mp4 /scratch/rohhs/downloads/yt-dlp/1009_segments/1009_segments-4.mp4"
 save_path=/scratch/rohhs/downloads/yt-dlp/
 
 # python app.py --save_path $save_path

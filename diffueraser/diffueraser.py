@@ -194,20 +194,20 @@ class DiffuEraser:
         ## load model
         self.vae = AutoencoderKL.from_pretrained(vae_path)
         self.noise_scheduler = DDPMScheduler.from_pretrained(base_model_path, 
-                subfolder="scheduler",
-                prediction_type="v_prediction",
-                timestep_spacing="trailing",
-                rescale_betas_zero_snr=True
-            )
+            subfolder="scheduler",
+            prediction_type="v_prediction",
+            timestep_spacing="trailing",
+            rescale_betas_zero_snr=True
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(
-                    base_model_path,
-                    subfolder="tokenizer",
-                    use_fast=False,
-                )
+            base_model_path,
+            subfolder="tokenizer",
+            use_fast=False,
+        )
         text_encoder_cls = import_model_class_from_model_name_or_path(base_model_path,revision)
         self.text_encoder = text_encoder_cls.from_pretrained(
-                base_model_path, subfolder="text_encoder"
-            )
+            base_model_path, subfolder="text_encoder"
+        )
         self.brushnet = BrushNetModel.from_pretrained(diffueraser_path, subfolder="brushnet")
         self.unet_main = UNetMotionModel.from_pretrained(
             diffueraser_path, subfolder="unet_main",

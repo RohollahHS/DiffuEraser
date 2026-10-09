@@ -16,3 +16,4 @@ pip install pip --upgrade
 
 pip install -r requirements.txt
 
+# ln -s $HF_HUB/ weights
